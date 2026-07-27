@@ -1,0 +1,167 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+
+	"github.com/Logiqode/ThemeParkNFT/internal/config"
+	"github.com/Logiqode/ThemeParkNFT/internal/health"
+	"github.com/Logiqode/ThemeParkNFT/internal/postgres"
+	redisClient "github.com/Logiqode/ThemeParkNFT/internal/redis"
+	"github.com/Logiqode/ThemeParkNFT/internal/storage"
+	suiClient "github.com/Logiqode/ThemeParkNFT/internal/sui"
+)
+
+func main() {
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	cfg := config.MustLoad()
+	log.Info().Msg("minter service starting")
+
+	db, err := sqlx.Connect("pgx", cfg.Postgres.DSN())
+	if err != nil {
+		log.Fatal().Err(err).Msg("postgres connect failed")
+	}
+	defer db.Close()
+
+	redis := redisClient.NewClient(cfg.Redis)
+	defer redis.Close()
+	repo := postgres.NewRepository(db)
+	sui, err := suiClient.NewClient(cfg.Sui)
+	if err != nil {
+		log.Fatal().Err(err).Msg("sui client init failed")
+	}
+
+	// Initialize IPFS pinning (Pinata) and CID cache.
+	// Implements Option A: artwork + metadata pinned once per ride, reused for all NFTs.
+	pinata := storage.NewPinataClient(cfg.Pinata.APIKey, cfg.Pinata.APISecret, cfg.Pinata.Gateway)
+	cidCache := storage.NewCIDCache(pinata)
+
+	if cfg.Pinata.APIKey == "" {
+		log.Warn().Msg("PINATA_API_KEY not set — IPFS pinning disabled, NFTs will use placeholder URLs")
+	}
+
+	mux := http.NewServeMux()
+	checker := health.NewHealthChecker("minter")
+	mux.HandleFunc("/healthz", checker.HealthzHandler())
+	mux.HandleFunc("/readyz", checker.ReadyzHandler())
+
+	// POST /mint/daily — batch mint NFTs for a user's daily rides.
+	// Flow: Redis rides → ensure IPFS assets pinned (cached per ride) → batch mint with metadata URLs.
+	mux.HandleFunc("/mint/daily", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Email string `json:"email"`
+			Date  string `json:"date"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.Email == "" || req.Date == "" {
+			http.Error(w, "email and date required", http.StatusBadRequest)
+			return
+		}
+
+		user, err := repo.GetUserByEmail(r.Context(), req.Email)
+		if err != nil || user.SuiAddress == nil {
+			http.Error(w, "user not found or no Sui address (register via POST /api/auth/google first)", http.StatusBadRequest)
+			return
+		}
+
+		rideIDs, err := redis.GetUserRides(r.Context(), req.Email, req.Date)
+		if err != nil || len(rideIDs) == 0 {
+			http.Error(w, "no rides found for this date", http.StatusNotFound)
+			return
+		}
+
+		// Ensure artwork + metadata are pinned to IPFS for each ride.
+		// CIDCache implements Option A: pin once per ride, reuse forever.
+		names := make([]string, len(rideIDs))
+		metadataURLs := make([]string, len(rideIDs))
+
+		for i, rideID := range rideIDs {
+			assets, err := cidCache.GetOrPin(r.Context(), rideID, req.Date)
+			if err != nil {
+				log.Error().Err(err).Str("ride_id", rideID).Msg("failed to pin ride assets")
+				http.Error(w, fmt.Sprintf("IPFS pinning failed for %s: %v", rideID, err), http.StatusInternalServerError)
+				return
+			}
+			names[i] = storage.RideName(rideID)
+			metadataURLs[i] = assets.MetadataURI
+		}
+
+		log.Info().
+			Str("email", req.Email).
+			Str("date", req.Date).
+			Int("ride_count", len(rideIDs)).
+			Int("cid_cache_size", cidCache.Size()).
+			Msg("batch minting with IPFS metadata")
+
+		txDigest, err := sui.MintBatchAttendance(r.Context(), *user.SuiAddress, rideIDs, req.Date, names, metadataURLs)
+		if err != nil {
+			log.Error().Err(err).Str("user_id", req.Email).Msg("mint failed")
+			http.Error(w, "mint failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		for _, rideID := range rideIDs {
+			_ = repo.RecordMint(r.Context(), user.ID, rideID, req.Date, txDigest, 0)
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tx_digest":     txDigest,
+			"ride_ids":      rideIDs,
+			"metadata_urls": metadataURLs,
+			"status":        "confirmed",
+		})
+	})
+
+	// POST /api/auth/google — zkLogin: exchange Google JWT for Sui address
+	mux.HandleFunc("/api/auth/google", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct{ Token string `json:"token"` }
+		json.NewDecoder(r.Body).Decode(&req)
+
+		suiAddr, ek, proof, err := sui.DeriveSuiAddressFromJWT(r.Context(), req.Token)
+		if err != nil {
+			http.Error(w, "zkLogin failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Extract email from JWT (simplified — in prod, verify the JWT properly)
+		email := "user@example.com" // placeholder: parse from JWT claims
+		user, err := repo.CreateUser(r.Context(), email)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = repo.UpdateSuiAccount(r.Context(), user.ID, suiAddr, ek, proof)
+
+		json.NewEncoder(w).Encode(map[string]string{
+			"user_id":     fmt.Sprintf("%d", user.ID),
+			"sui_address": suiAddr,
+		})
+	})
+
+	srv := &http.Server{Addr: ":8083", Handler: mux}
+	go func() { log.Info().Msg("minter API listening on :8083"); _ = srv.ListenAndServe() }()
+	<-ctx.Done()
+	srv.Shutdown(context.Background())
+}

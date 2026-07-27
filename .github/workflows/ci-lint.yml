@@ -1,0 +1,57 @@
+name: CI — Lint & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: themepark
+          POSTGRES_PASSWORD: themepark_dev
+          POSTGRES_DB: themepark
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U themepark"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+      - name: Build
+        run: make build
+      - name: Test
+        run: make test
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: themepark
+          POSTGRES_PASSWORD: themepark_dev
+          POSTGRES_DB: themepark
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379

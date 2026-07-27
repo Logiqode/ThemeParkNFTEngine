@@ -1,0 +1,46 @@
+# Dependencies
+vendor/
+
+# Build
+/bin/
+/dist/
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+pgdata/
+
+# Go
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Sui / Move
+move/attendance_nft/build/
+move/attendance_nft/Move.lock
+move/attendance_nft/Published.toml
+.bin/
+
+# Logs
+*.log
+
+# IDE (additional)
+.zed/
+.cursor/
+
+# Memory bank (local)
+memory-bank/

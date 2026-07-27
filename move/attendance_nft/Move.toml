@@ -1,0 +1,7 @@
+[package]
+name = "attendance_nft"
+version = "0.1.0"
+edition = "2024.beta"
+
+[addresses]
+attendance_nft = "0x78c9dbba118923c4976599877450cd281f880f94d217d806714782a658b01d1e"
