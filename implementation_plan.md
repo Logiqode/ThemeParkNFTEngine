@@ -2,7 +2,30 @@
 
 > **Status:** Active — Living document. Check off `[x]` as each milestone completes.
 > **Mode:** ACT MODE execution. Single developer, 8-week sprint.
-> **Last updated:** 2026-08-01 — Week 1 gap review + business-flow redesign (NFC wristband binding, right-to-be-forgotten, benchmark scripts).
+> **Last updated:** 2026-08-02 — Week 1 gap review + business-flow redesign (NFC wristband binding, right-to-be-forgotten, benchmark scripts); **Hotfix H: CI Kafka KRaft `CLUSTER_ID` executed** (local verification PASS; push pending).
+
+---
+
+## Hotfix H — CI Kafka KRaft `CLUSTER_ID` (2026-08-02) — EXECUTED (local verification PASS; push pending)
+
+**Root cause (pinpointed from GH Actions log):** `CLUSTER_ID: MkU3OEVBNTcwNTJENDM5QkU` in `ci-lint.yml` (L44) and `ci-build.yml` (L20) is an **invalid KRaft cluster ID**: 23 base64 chars → decodes to **17 bytes**; KRaft requires a base64-encoded **16-byte UUID** (22 unpadded chars). It is the canonical Confluent docs example `MkU3OEVBNTcwNTJENDM5Qk` with an extra trailing `U`. `kafka-storage format` refuses during container `configure` → container exits → healthcheck goes `unhealthy` → *"Service container kafka failed"* before any test step runs. **Not** a KRaft architecture problem — a one-character typo copy-pasted into both workflows.
+
+**Decision: keep KRaft single-node** (locked Q4). Zookeeper-mode is deprecated upstream (removed in Kafka 4.0), the ZK pair previously failed in this repo's GH Actions (progress.md blocker #3), and it doubles CI container boot time — reverting would fix nothing, since the defect is the ID string, not KRaft.
+
+### Steps
+- [x] **H1.** Generate a valid cluster ID: `docker run --rm confluentinc/cp-kafka:7.6.0 kafka-storage random-uuid` (outputs a valid 22-char base64url UUID). Fallback: documented example `MkU3OEVBNTcwNTJENDM5Qk`. → **generated `yISJZ6USQ8Kx-18tILTh0w`**
+- [x] **H2.** `.github/workflows/ci-lint.yml`: replace `CLUSTER_ID: MkU3OEVBNTcwNTJENDM5QkU` with the H1 ID; correct the comment (ID is required by the image entrypoint in KRaft mode; value must be a base64-encoded UUID).
+- [x] **H3.** `.github/workflows/ci-build.yml`: same replacement (identical ID value in both files for consistency).
+- [x] **H4.** Hardening: add `--health-start-period 20s` to the kafka service `options` block in both workflows (broker needs ~10–20s to format storage + start; avoids burning health retries).
+- [x] **H5.** Local replication of the GH service container with the exact env/port/health flags from the workflow → poll `docker inspect --format '{{.State.Health.Status}}'` until `healthy`; then `docker rm -f` + network cleanup. (Stop local compose kafka first — host port 29092 must be free, R5 default.) → **PASS: `healthy` on first poll, `Kafka Server started`, generated cluster id accepted.**
+- [x] **H6.** Local M2.1 gate against that container: `INTEGRATION=1 KAFKA_BROKERS=localhost:29092 KAFKA_TOPIC_RIDE_SCANS=ride-scans go test -tags=integration ./internal/kafka -run TestIntegrationDelivery -count=1` → **PASS (`ok … 17.2s`, 1000/1000, 0 dups)** — after surfacing the second latent failure (missing topic; see H9).
+- [x] **H9.** *(discovered by H6)* Add `Create Kafka topics` step to both workflows (`docker exec` into the GH service container, `kafka-topics --create --if-not-exists … ride-scans --partitions 6`) — CI equivalent of local `kafka-init`. Verified locally against the replica.
+- [ ] **H7.** Commit; **user pushes** (`git push origin main` — sandbox has no GH creds); confirm both workflows green.
+- [x] **H8.** Update memory bank (`progress.md` CI blocker entry, `activeContext.md` resolved defects).
+
+### Alternatives considered
+- **B — Omit `CLUSTER_ID` entirely** and rely on the cp-kafka 7.6.0 entrypoint to auto-generate one. Fewer hardcoded values, but depends on image-internal behavior — only adopt if H5 verifies the auto-generation path explicitly.
+- **C — Zookeeper + Kafka pair** — **rejected**: deprecated upstream, previously failed in this repo's CI, slower, violates locked Q4.
 
 ---
 

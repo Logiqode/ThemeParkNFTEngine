@@ -39,9 +39,9 @@ jobs:
         ports:
           - 29092:29092
         env:
-          # KRaft combined mode requires a CLUSTER_ID (the CP docker-compose
-          # wrapper auto-generates it; GitHub service containers don't).
-          CLUSTER_ID: MkU3OEVBNTcwNTJENDM5QkU
+          # KRaft combined mode requires CLUSTER_ID to be a base64-encoded
+          # UUID (16 bytes -> 22 chars). Generated via `kafka-storage random-uuid`.
+          CLUSTER_ID: yISJZ6USQ8Kx-18tILTh0w
           KAFKA_BROKER_ID: 1
           KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:29093
           KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
@@ -57,6 +57,7 @@ jobs:
           --health-cmd "kafka-broker-api-versions --bootstrap-server localhost:29092"
           --health-interval 10s
           --health-timeout 5s
+          --health-start-period 20s
           --health-retries 15
     steps:
       - name: Checkout
@@ -89,6 +90,12 @@ jobs:
           POSTGRES_USER: themepark
           POSTGRES_PASSWORD: themepark_dev
           POSTGRES_DB: themepark
+      - name: Create Kafka topics
+        # CI equivalent of the local kafka-init compose service: ride-scans must
+        # exist before produce (auto-create is unreliable on the kafka-go path).
+        run: |
+          KAFKA_CID=$(docker ps --filter "ancestor=confluentinc/cp-kafka:7.6.0" --format "{{.ID}}")
+          docker exec "$KAFKA_CID" kafka-topics --create --if-not-exists --bootstrap-server localhost:29092 --topic ride-scans --partitions 6 --replication-factor 1
       - name: Test (integration smoke)
         run: |
           go test -tags=integration ./internal/pipeline -coverprofile=coverage-integration.txt -count=1
