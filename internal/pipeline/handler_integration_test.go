@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jmoiron/sqlx"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jmoiron/sqlx"
 
 	"github.com/Logiqode/ThemeParkNFT/internal/config"
 	"github.com/Logiqode/ThemeParkNFT/internal/models"
@@ -153,22 +153,3 @@ func TestIntegrationMultipleRidesAggregated(t *testing.T) {
 		}
 	}
 }
-
-</write_to_file>
-<task_progress>
-- [x] R8: Memory bank
-- [x] R17a: QR route rename
-- [x] R5: Kafka default
-- [x] R1: Migrations tooling + Makefile
-- [x] R7: Compose + make healthy
-- [x] R2: Strict readiness wired in all 4 services
-- [x] R3: config.Validate + gate + minter
-- [x] R16: internal/auth/TxnCheckPerformer + MockTxnCheck
-- [x] R4: Unit tests + pipeline handler + consumer refactor
-- [x] R4: Integration smoke test created
-- [ ] R4: Add models import to integration test (check compile)
-- [ ] R4: CI Kafka service
-- [ ] Verify build + tests
-- [ ] Update implementation_plan + memory-bank + README
-</task_progress>
-</write_to_file>
