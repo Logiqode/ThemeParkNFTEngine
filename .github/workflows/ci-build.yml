@@ -1,0 +1,48 @@
+name: CI — Build Images & M2.1 Kafka Delivery
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-loadgen:
+    runs-on: ubuntu-latest
+    services:
+      kafka:
+        image: confluentinc/cp-kafka:7.6.0
+        ports:
+          - 29092:29092
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:29093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:29092
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+        options: >-
+          --health-cmd "kafka-broker-api-versions --bootstrap-server localhost:29092"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+      - name: Build loadgen image
+        run: docker build -f deployments/Dockerfile.loadgen -t themepark-loadgen:ci .
+      - name: M2.1 Kafka delivery integration test
+        run: go test -tags=integration ./internal/kafka -run TestIntegrationDelivery -count=1
+        env:
+          INTEGRATION: "1"
+          KAFKA_BROKERS: localhost:29092
+          KAFKA_TOPIC_RIDE_SCANS: ride-scans

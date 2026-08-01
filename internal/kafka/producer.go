@@ -13,13 +13,33 @@ import (
 	"github.com/Logiqode/ThemeParkNFT/internal/models"
 )
 
+// Producer publishes ScanEvents to the ride-scans Kafka topic.
+//
+// Delivery semantics (Q1 decision — effectively-once on the consumer side):
+//   - segmentio/kafka-go does NOT implement the Java client's idempotent
+//     producer protocol (producer PID/epoch + sequence numbers). There is no
+//     way to set `enable.idempotence=true` with this library.
+//   - Instead we enforce effectively-once via the combination of:
+//     1. RequiredAcks=RequireAll (leader + all in-sync replicas ack)
+//     2. MaxAttempts (kafka-go retries transient broker errors before returning)
+//     3. Consumer-side idempotency: every ScanEvent carries a unique `trace_id`
+//        used as the Kafka message key AND the Redis SETNX dedup key
+//        (internal/pipeline.ScanHandler). At-least-once Kafka delivery +
+//        exactly-once processing of each trace_id = effectively-once end-to-end.
+//   - Async mode (KAFKA_PRODUCER_ASYNC=true) is available for the future
+//     Week 3 gate producer path where fire-and-forget throughput is preferred;
+//     async errors are surfaced via Writer.Stats().Errors (kafka-go has no
+//     error channel). The load generator / benchmark harness keeps Async=false
+//     so that every batch write returns with a definitive success/error and the
+//     benchmark manifest records only actually-delivered trace_ids.
 type Producer struct {
 	writer  *kafka.Writer
-	topic   string
 	brokers []string
+	async   bool
 }
 
-// NewProducer creates a new Kafka producer with idempotence enabled.
+// NewProducer creates a new Kafka producer with acks=all + retries.
+// Pass cfg.ProducerAsync=true to enable the async writer mode.
 func NewProducer(cfg config.KafkaConfig) *Producer {
 	brokers := cfg.BrokerList()
 	w := &kafka.Writer{
@@ -30,25 +50,39 @@ func NewProducer(cfg config.KafkaConfig) *Producer {
 		MaxAttempts:  3,
 		BatchSize:    100,
 		BatchTimeout: 10 * time.Millisecond,
-		Async:        false,
+		Async:        cfg.ProducerAsync,
 	}
-	return &Producer{writer: w, topic: cfg.TopicRideScans, brokers: brokers}
+	return &Producer{writer: w, brokers: brokers, async: cfg.ProducerAsync}
+}
+
+// buildMessages converts ScanEvents to kafka.Messages. Pure and broker-free so
+// unit tests can verify the wire format (key = trace_id, header = traceparent,
+// value = JSON ScanEvent) without a running broker.
+func buildMessages(events []*models.ScanEvent) ([]kafka.Message, error) {
+	msgs := make([]kafka.Message, 0, len(events))
+	for i, event := range events {
+		val, err := json.Marshal(event)
+		if err != nil {
+			return nil, fmt.Errorf("marshal event %d: %w", i, err)
+		}
+		msgs = append(msgs, kafka.Message{
+			Key:   []byte(event.TraceID),
+			Value: val,
+			Headers: []kafka.Header{
+				{Key: "traceparent", Value: []byte(event.TraceID)},
+			},
+		})
+	}
+	return msgs, nil
 }
 
 // PublishScanEvent marshals a ScanEvent to JSON and writes it to Kafka.
 func (p *Producer) PublishScanEvent(ctx context.Context, event *models.ScanEvent) error {
-	val, err := json.Marshal(event)
+	msgs, err := buildMessages([]*models.ScanEvent{event})
 	if err != nil {
-		return fmt.Errorf("marshal ScanEvent: %w", err)
+		return err
 	}
-	msg := kafka.Message{
-		Key:   []byte(event.TraceID),
-		Value: val,
-		Headers: []kafka.Header{
-			{Key: "traceparent", Value: []byte(event.TraceID)},
-		},
-	}
-	if err := p.writer.WriteMessages(ctx, msg); err != nil {
+	if err := p.writer.WriteMessages(ctx, msgs...); err != nil {
 		log.Error().Err(err).Str("trace_id", event.TraceID).Msg("kafka write failed")
 		return fmt.Errorf("write messages: %w", err)
 	}
@@ -57,20 +91,12 @@ func (p *Producer) PublishScanEvent(ctx context.Context, event *models.ScanEvent
 }
 
 // PublishBatch sends multiple ScanEvents in a batch for throughput.
+// In sync mode (default) the write returns only after the broker acks all
+// messages, so a nil error means every event in the batch was delivered.
 func (p *Producer) PublishBatch(ctx context.Context, events []*models.ScanEvent) error {
-	msgs := make([]kafka.Message, len(events))
-	for i, event := range events {
-		val, err := json.Marshal(event)
-		if err != nil {
-			return fmt.Errorf("marshal event %d: %w", i, err)
-		}
-		msgs[i] = kafka.Message{
-			Key:   []byte(event.TraceID),
-			Value: val,
-			Headers: []kafka.Header{
-				{Key: "traceparent", Value: []byte(event.TraceID)},
-			},
-		}
+	msgs, err := buildMessages(events)
+	if err != nil {
+		return err
 	}
 	if err := p.writer.WriteMessages(ctx, msgs...); err != nil {
 		return fmt.Errorf("write batch: %w", err)
@@ -94,8 +120,10 @@ func (p *Producer) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Close flushes and closes the producer.
+// Close flushes and closes the producer. In async mode this blocks until the
+// writer has flushed buffered messages, satisfying the graceful-shutdown
+// requirement (M2.4: SIGTERM mid-batch → all in-flight flushed, no data loss).
 func (p *Producer) Close() error {
-	log.Info().Msg("kafka producer shutting down, flushing...")
+	log.Info().Bool("async", p.async).Msg("kafka producer shutting down, flushing...")
 	return p.writer.Close()
 }

@@ -32,6 +32,29 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      # KRaft-mode Kafka (no zookeeper pair — that failed in GH Actions before).
+      # Used by the M2.1 delivery integration test (Week 2).
+      kafka:
+        image: confluentinc/cp-kafka:7.6.0
+        ports:
+          - 29092:29092
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:29093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:29092
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+        options: >-
+          --health-cmd "kafka-broker-api-versions --bootstrap-server localhost:29092"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -64,7 +87,9 @@ jobs:
           POSTGRES_PASSWORD: themepark_dev
           POSTGRES_DB: themepark
       - name: Test (integration smoke)
-        run: go test -tags=integration ./internal/pipeline -coverprofile=coverage-integration.txt -count=1
+        run: |
+          go test -tags=integration ./internal/pipeline -coverprofile=coverage-integration.txt -count=1
+          go test -tags=integration ./internal/kafka -run TestIntegrationDelivery -count=1
         env:
           INTEGRATION: "1"
           POSTGRES_HOST: localhost
@@ -74,6 +99,7 @@ jobs:
           POSTGRES_DB: themepark
           REDIS_HOST: localhost
           REDIS_PORT: 6379
+          KAFKA_BROKERS: localhost:29092
       - name: Upload coverage
         uses: actions/upload-artifact@v6
         with:

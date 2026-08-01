@@ -80,8 +80,10 @@ services:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
     ports:
       - "4317:4317"
+    # v0.120.x images are distroless (no /healthcheck/healthcheck_linux, no shell);
+    # validate the config with the collector binary itself as the liveness probe.
     healthcheck:
-      test: ["CMD", "/healthcheck/healthcheck_linux", "--grpc-port", "4317"]
+      test: ["CMD", "/otelcol-contrib", "validate", "--config=/etc/otel-collector-config.yaml"]
       interval: 10s
       timeout: 5s
       retries: 5

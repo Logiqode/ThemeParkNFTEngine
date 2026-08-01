@@ -53,6 +53,26 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestKafkaProducerAsync(t *testing.T) {
+	// Default is sync (false) — load benchmarks rely on per-batch delivery results.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Kafka.ProducerAsync {
+		t.Error("Kafka.ProducerAsync default = true, want false (sync)")
+	}
+
+	t.Setenv("KAFKA_PRODUCER_ASYNC", "true")
+	cfg2, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg2.Kafka.ProducerAsync {
+		t.Error("Kafka.ProducerAsync = false, want true after KAFKA_PRODUCER_ASYNC=true")
+	}
+}
+
 func TestDSN(t *testing.T) {
 	p := PostgresConfig{Host: "h", Port: 1, User: "u", Password: "p", DB: "d", SSLMode: "disable"}
 	want := "host=h port=1 user=u password=p dbname=d sslmode=disable"

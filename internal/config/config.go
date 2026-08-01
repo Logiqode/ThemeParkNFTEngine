@@ -73,6 +73,11 @@ type KafkaConfig struct {
 	Partitions     int    `envconfig:"KAFKA_PARTITIONS" default:"6"`
 	Replication    int    `envconfig:"KAFKA_REPLICATION" default:"1"`
 	RetentionMS    int64  `envconfig:"KAFKA_RETENTION_MS" default:"604800000"`
+	// ProducerAsync switches the segmentio/kafka-go writer from sync to async
+	// mode. Async improves peak throughput at the cost of per-message error
+	// surfaces (errors surface via the writer's error channel / stats). Load
+	// tests default to sync so per-batch delivery success is directly measured.
+	ProducerAsync bool `envconfig:"KAFKA_PRODUCER_ASYNC" default:"false"`
 }
 
 // BrokerList returns the brokers as a slice.

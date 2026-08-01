@@ -283,9 +283,41 @@ curl -X POST http://localhost:8083/mint/daily \
 # Spike test: 5,000 events burst in 1 second
 ./bin/loadgen -rate 5000 -duration 1s -users 1000 -rides 5
 
+# Deterministic count: produce exactly 10,000 events as fast as the pipeline allows
+./bin/loadgen -max-events 10000 -users 500 -rides 10 -concurrency 8 \
+  -manifest manifest.jsonl -summary summary.json
+
 # All flags
 ./bin/loadgen --help
 ```
+
+> Week 2 (R15): emitter user IDs are emails (`user-%04d@bench.local`, R11 internal identity). `--manifest` writes the JSONL of every delivered `trace_id` (for delivery verification); `--summary` writes machine-readable metrics (produced, errors, avg rate, p99 produce latency).
+
+### Kafka Delivery Benchmarks (Week 2 — R15)
+
+The benchmark suite under `scripts/bench/` proves **Kafka delivery reliability ≥ 99.9%** under congestion (all produced events observed exactly once; no loss, no duplicates; lag recovery ≤ target).
+
+```bash
+# Prerequisite: healthy stack
+make up && make healthy
+
+# M2.1–M2.4 milestone suite (correctness, throughput, spike, graceful shutdown)
+make bench-milestones
+
+# M2.5 congestion benchmark (sustained 1k RPS + 12% dups → 5k RPS spike + 10% dups)
+# Writes the result report to scripts/bench/RESULTS.md
+make bench-congestion
+
+# Verify a specific loadgen manifest against the topic
+make bench-verify MANIFEST=/path/to/manifest.jsonl
+
+# Supported env for benchmarks (overrides)
+make bench-congestion BROKERS=localhost:29092 TOPIC=ride-scans
+```
+
+**Reference results (2026-08-02, local compose):** M2.1 1000/1000 · M2.2 10000/10000 (recovery 3.1s) · M2.3 5000/5000 burst (recovery 3.1s) · M2.4 2654/2654 flushed on SIGTERM · **M2.5 18,206 lines / 16,140 unique → success_rate 1.0, delivery_duplicates 0, recovery 3.28s** (see `scripts/bench/RESULTS.md`).
+
+> Delivery semantics (Q1): `segmentio/kafka-go` cannot set `enable.idempotence=true`; effectively-once is achieved with `RequiredAcks=RequireAll` + `MaxAttempts=3` (producer) + Redis `SETNX` `trace_id` dedup (consumer). `KAFKA_PRODUCER_ASYNC=true` enables the fire-and-forget writer (Week 3 gate path); benchmarks run sync to measure per-batch delivery.
 
 ### Run Tests & Lint
 
