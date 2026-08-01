@@ -39,6 +39,9 @@ jobs:
         ports:
           - 29092:29092
         env:
+          # KRaft combined mode requires a CLUSTER_ID (the CP docker-compose
+          # wrapper auto-generates it; GitHub service containers don't).
+          KAFKA_CLUSTER_ID: PBco4w+gC4A+eZFHn8Whsg==
           KAFKA_BROKER_ID: 1
           KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:29093
           KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
