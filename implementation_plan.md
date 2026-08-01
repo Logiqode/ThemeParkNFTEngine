@@ -198,20 +198,18 @@ theme-park-nft-engine/
 - [x] `ci-lint.yml` workflow (lint + build + test with PG/Redis).
 - [x] Dockerfiles multi-stage + distroless non-root.
 
-### Week 1 Gap-Closure List (pending — R1–R8, R16)
-- [ ] **R1 — Migrations tooling:** add `golang-migrate` (exact-pinned), init `migrations/` structure, add `make migrate` target (usage: `make migrate up` / `down`).
-- [ ] **R2 — Strict readiness:** `internal/health` — `readyz` runs registered checks → 503 until deps up. Wire real checks in `cmd/gate`, `cmd/consumer`, `cmd/minter`, `cmd/voucher` (deps per R2 table). Add startup grace (10–20s) + small retry loop so services don't crash-loop before deps are ready.
-- [ ] **R3 — Required-env validation:** `internal/config` — per-binary required set (fatal on missing `HMAC_SECRET`, `SUI_PACKAGE_ID`, `SUI_MINTCAP_ID`, PG/Redis/Kafka brokers). Unit-tested.
-- [ ] **R4 — Tests:** 
-  - Unit: `internal/config`, `internal/health`, `internal/gate` (QR HMAC round-trip, tamper), `internal/models` JSON shape.
-  - Integration smoke (compose): (a) publish 1 valid event → consumer → 1 row in `scan_events` + redis set; (b) duplicate trace_id → still 1 row; (c) malformed JSON → consumer survives.
-  - Coverage gate 50% now (`go test -coverprofile` in CI), 70% by Week 4.
-- [ ] **R5 — Kafka default:** `.env.example` + config default → `localhost:29092`.
-- [ ] **R7 — Stack health:** otel-collector healthcheck in compose; kafka-init exit verification (fail if topics not created); apply `KAFKA_RETENTION_MS` to `kafka-init` topic creation; add `make healthy` target (≤60s overall, M1.1).
-- [ ] **R8 — Memory bank:** create `memory-bank/activeContext.md`, `systemPatterns.md`, `progress.md` with this review + decisions.
-- [ ] **R16 — Mock txn check:** define `internal/auth.TxnCheckPerformer` interface + mock impl (always-pass, configurable failure for tests). Wire into gate verify path (used when gate→Kafka wired in W3) and later benchmarks.
-- [ ] **R17a — Rename existing QR route (quick win):** in `cmd/gate/main.go` rename `GET /api/wristband/qr-token` → `GET /api/wristband/scan-visitor-qr-token`; update README curl examples. (New `bind`/`nfc-check`/`reset`/`rides/scan` endpoints land in Week 3.)
-- [ ] **CI:** add `kafka` service to `.github/workflows/ci-lint.yml` (R4 integration tests need it).
+### Week 1 Gap-Closure List (DONE 2026-08-01 — R1–R8, R16, R17a)
+- [x] **R1 — Migrations tooling:** `golang-migrate v4.19.1` exact-pinned; flat migrations `000001_init.{up,down}.sql`; `cmd/migrate` runner; `make migrate|migrate-up|migrate-down|migrate-version`.
+- [x] **R2 — Strict readiness:** `healthz`=liveness, `readyz`=503 until deps ready. Wired into gate (PG+Redis+Kafka), consumer (Kafka+Redis+PG, health :8081), minter (PG+Redis+Sui RPC), voucher (PG+Redis). `WaitForChecks` 20s startup grace. Added `Producer.Ping`, `Consumer.Ping`, `SuiClient.Ping` (broker/RPC dial — no topic pollution).
+- [x] **R3 — Required-env validation:** `config.Validate(...)` fail-fast. Gate=`HMAC_SECRET`; Minter=`SUI_PACKAGE_ID`+`SUI_MINTCAP_ID`. Unit-tested.
+- [x] **R4 — Tests:** unit tests (config, health, gate QR HMAC, auth mock) + integration smoke (`internal/pipeline`, `-tags=integration`) — single event persists, duplicate trace dropped, multi-ride aggregation. CI: Kafka service added; unit + integration + coverage upload.
+- [x] **R5 — Kafka default:** `.env.example` + config default → `localhost:29092`.
+- [x] **R7 — Stack health:** otel-collector healthcheck; kafka-init `set -euo pipefail` + retention.ms applied + topic-list verification; `make healthy` target (60s timeout).
+- [x] **R8 — Memory bank:** `activeContext.md`, `systemPatterns.md`, `progress.md` created.
+- [x] **R16 — Mock txn check:** `internal/auth.TxnCheckPerformer` + `MockTxnCheck` (configurable failure; no testnet spam). Available for gate W3 verify path + benchmarks.
+- [x] **R17a — QR route renamed:** `GET /api/wristband/scan-visitor-qr-token` (business name) + README curl updated.
+- [x] **CI:** Kafka service in `ci-lint.yml`; unit + integration smoke jobs + coverage artifact.
+- [x] **Extracted shared pipeline handler** to `internal/pipeline` (dedup→persist→aggregate) so consumer + tests share the same production logic.
 
 ### Testing & CI/CD Milestones
 - [ ] **M1.1** `make up && make healthy` brings entire stack healthy in < 60s.

@@ -72,6 +72,16 @@ func (c *Client) DeriveSuiAddressFromJWT(ctx context.Context, jwt string) (suiAd
 	return addr, ek, pf, nil
 }
 
+// Ping verifies Sui RPC connectivity with a lightweight chain-identifier call.
+// Used as a readiness check (R2).
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.sdkClient.SuiCall(ctx, "sui_getChainIdentifier")
+	if err != nil {
+		return fmt.Errorf("sui ping: %w", err)
+	}
+	return nil
+}
+
 // MintBatchAttendance submits a real batch mint MoveCall to the Sui blockchain.
 // Signs with the gas pool private key and retries on HTTP 429.
 // Calls attendance::mint_batch(MintCap, recipient, ride_ids, date, names, metadata_urls).

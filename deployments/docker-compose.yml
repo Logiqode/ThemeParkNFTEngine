@@ -40,9 +40,12 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
-        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 --topic ride-scans --partitions 6 --replication-factor 1
-        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 --topic ride-scans-dlq --partitions 3 --replication-factor 1
-        echo "Topics created"
+        set -euo pipefail
+        RETENTION="$${KAFKA_RETENTION_MS:-604800000}"
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 --topic ride-scans --partitions 6 --replication-factor 1 --config retention.ms="$${RETENTION}"
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:9092 --topic ride-scans-dlq --partitions 3 --replication-factor 1 --config retention.ms="$${RETENTION}"
+        echo "Topics created:"
+        kafka-topics --bootstrap-server kafka:9092 --list
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
@@ -63,7 +66,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ../migrations/0001_init/up.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ../migrations/000001_init.up.sql:/docker-entrypoint-initdb.d/01_init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U themepark"]
       interval: 5s
@@ -76,5 +79,10 @@ services:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
     ports:
       - "4317:4317"
+    healthcheck:
+      test: ["CMD", "/healthcheck/healthcheck_linux", "--grpc-port", "4317"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 volumes:
   pgdata:

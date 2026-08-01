@@ -22,11 +22,13 @@ type Consumer struct {
 	handler MessageHandler
 	wg      sync.WaitGroup
 	workers int
+	brokers []string
 }
 
 func NewConsumer(cfg config.KafkaConfig, groupID string, handler MessageHandler, workers int) *Consumer {
+	brokers := cfg.BrokerList()
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:        cfg.BrokerList(),
+		Brokers:        brokers,
 		GroupID:        groupID,
 		Topic:          cfg.TopicRideScans,
 		MinBytes:       1,
@@ -35,7 +37,21 @@ func NewConsumer(cfg config.KafkaConfig, groupID string, handler MessageHandler,
 		StartOffset:    kafka.FirstOffset,
 		MaxAttempts:    5,
 	})
-	return &Consumer{reader: r, handler: handler, workers: workers}
+	return &Consumer{reader: r, handler: handler, workers: workers, brokers: brokers}
+}
+
+// Ping verifies Kafka connectivity by dialing each configured broker via the
+// Kafka protocol (API-version handshake). Used as a readiness check (R2).
+func (c *Consumer) Ping(ctx context.Context) error {
+	_ = ctx // kafka.Dial performs its own handshake with a short timeout.
+	for _, addr := range c.brokers {
+		conn, err := kafka.Dial("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("kafka ping broker %s: %w", addr, err)
+		}
+		conn.Close()
+	}
+	return nil
 }
 
 // Run starts consuming messages with a worker pool.

@@ -29,6 +29,9 @@ func main() {
 	defer stop()
 
 	cfg := config.MustLoad()
+	if err := cfg.Validate("SUI_PACKAGE_ID", "SUI_MINTCAP_ID"); err != nil {
+		log.Fatal().Err(err).Msg("minter startup: missing required environment")
+	}
 	log.Info().Msg("minter service starting")
 
 	db, err := sqlx.Connect("pgx", cfg.Postgres.DSN())
@@ -54,8 +57,19 @@ func main() {
 		log.Warn().Msg("PINATA_API_KEY not set — IPFS pinning disabled, NFTs will use placeholder URLs")
 	}
 
-	mux := http.NewServeMux()
+	// Strict readiness checks (R2): Minter is ready when Postgres, Redis, and
+	// the Sui RPC endpoint are all reachable.
 	checker := health.NewHealthChecker("minter")
+	checker.AddCheck(func(ctx context.Context) error { return db.PingContext(ctx) })
+	checker.AddCheck(func(ctx context.Context) error { return redis.Ping(ctx) })
+	checker.AddCheck(func(ctx context.Context) error { return sui.Ping(ctx) })
+
+	// Startup grace: wait up to 20s for dependencies before serving traffic.
+	if err := health.WaitForChecks(ctx, checker, 20*time.Second); err != nil {
+		log.Fatal().Err(err).Msg("minter startup: dependencies not ready")
+	}
+
+	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", checker.HealthzHandler())
 	mux.HandleFunc("/readyz", checker.ReadyzHandler())
 

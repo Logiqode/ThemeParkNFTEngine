@@ -66,7 +66,7 @@ func (r RedisConfig) Addr() string {
 }
 
 type KafkaConfig struct {
-	Brokers        string `envconfig:"KAFKA_BROKERS" default:"localhost:9092"`
+	Brokers        string `envconfig:"KAFKA_BROKERS" default:"localhost:29092"`
 	TopicRideScans string `envconfig:"KAFKA_TOPIC_RIDE_SCANS" default:"ride-scans"`
 	TopicDLQ       string `envconfig:"KAFKA_TOPIC_DLQ" default:"ride-scans-dlq"`
 	ConsumerGroup  string `envconfig:"KAFKA_CONSUMER_GROUP" default:"ride-scan-consumers"`
@@ -150,6 +150,22 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("envconfig: %w", err)
 	}
 	return &cfg, nil
+}
+
+// Validate enforces the zero-trust required-environment policy (R3).
+// Each binary declares the environment variables it must have to run safely;
+// missing ones cause a fail-fast error at startup.
+func (c *Config) Validate(required ...string) error {
+	var missing []string
+	for _, key := range required {
+		if os.Getenv(key) == "" {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("required environment variables missing: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // MustLoad panics if configuration cannot be loaded.

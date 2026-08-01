@@ -221,8 +221,8 @@ curl http://localhost:8084/healthz
 ### Gate API (port 8080)
 
 ```bash
-# Generate a QR token
-curl http://localhost:8080/api/wristband/qr-token
+# Generate a QR token (gate staff: one-time HMAC QR for the visitor to present)
+curl http://localhost:8080/api/wristband/scan-visitor-qr-token
 
 # Verify a ticket
 curl -X POST http://localhost:8080/api/gate/verify \
@@ -348,7 +348,10 @@ docker exec deployments-kafka-1 kafka-console-consumer --bootstrap-server localh
 |---|---|
 | `make up` | Start all infrastructure (Docker Compose) |
 | `make down` | Stop all infrastructure |
-| `make build` | Compile all 5 binaries to `bin/` |
+| `make healthy` | Wait until all compose services are healthy (< 60s; `TIMEOUT=NN` to override) |
+| `make migrate` / `migrate-up` / `migrate-down` / `migrate-version` | Run versioned migrations via `cmd/migrate` |
+| `make build` | Compile all 6 binaries to `bin/` (incl. `migrate`) |
+| `make test-integration` | Run integration smoke tests (needs `make up`; set `INTEGRATION=1`) |
 | `make test` | Run all Go tests |
 | `make lint` | Run golangci-lint |
 | `make tidy` | Run `go mod tidy` |

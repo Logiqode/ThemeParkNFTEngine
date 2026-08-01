@@ -14,14 +14,16 @@ import (
 )
 
 type Producer struct {
-	writer *kafka.Writer
-	topic  string
+	writer  *kafka.Writer
+	topic   string
+	brokers []string
 }
 
 // NewProducer creates a new Kafka producer with idempotence enabled.
 func NewProducer(cfg config.KafkaConfig) *Producer {
+	brokers := cfg.BrokerList()
 	w := &kafka.Writer{
-		Addr:         kafka.TCP(cfg.BrokerList()...),
+		Addr:         kafka.TCP(brokers...),
 		Topic:        cfg.TopicRideScans,
 		Balancer:     &kafka.Hash{},
 		RequiredAcks: kafka.RequireAll,
@@ -30,7 +32,7 @@ func NewProducer(cfg config.KafkaConfig) *Producer {
 		BatchTimeout: 10 * time.Millisecond,
 		Async:        false,
 	}
-	return &Producer{writer: w, topic: cfg.TopicRideScans}
+	return &Producer{writer: w, topic: cfg.TopicRideScans, brokers: brokers}
 }
 
 // PublishScanEvent marshals a ScanEvent to JSON and writes it to Kafka.
@@ -74,6 +76,21 @@ func (p *Producer) PublishBatch(ctx context.Context, events []*models.ScanEvent)
 		return fmt.Errorf("write batch: %w", err)
 	}
 	log.Debug().Int("count", len(events)).Msg("batch produced")
+	return nil
+}
+
+// Ping verifies Kafka connectivity by dialing each configured broker via the
+// Kafka protocol (API-version handshake). Used as a readiness check (R2).
+// It does NOT write to the topic, so no test messages pollute the pipeline.
+func (p *Producer) Ping(ctx context.Context) error {
+	_ = ctx // kafka.Dial performs its own handshake with a short timeout.
+	for _, addr := range p.brokers {
+		conn, err := kafka.Dial("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("kafka ping broker %s: %w", addr, err)
+		}
+		conn.Close()
+	}
 	return nil
 }
 

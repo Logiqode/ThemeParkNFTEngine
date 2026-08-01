@@ -17,6 +17,7 @@ import (
 	"github.com/Logiqode/ThemeParkNFT/internal/config"
 	"github.com/Logiqode/ThemeParkNFT/internal/gate"
 	"github.com/Logiqode/ThemeParkNFT/internal/health"
+	internalKafka "github.com/Logiqode/ThemeParkNFT/internal/kafka"
 	redisClient "github.com/Logiqode/ThemeParkNFT/internal/redis"
 )
 
@@ -26,6 +27,9 @@ func main() {
 	defer stop()
 
 	cfg := config.MustLoad()
+	if err := cfg.Validate("HMAC_SECRET"); err != nil {
+		log.Fatal().Err(err).Msg("gate startup: missing required environment")
+	}
 	log.Info().Str("config", cfg.String()).Msg("gate starting")
 
 	db, err := sqlx.Connect("pgx", cfg.Postgres.DSN())
@@ -37,12 +41,26 @@ func main() {
 	redis := redisClient.NewClient(cfg.Redis)
 	defer redis.Close()
 
+	producer := internalKafka.NewProducer(cfg.Kafka)
+	defer producer.Close()
+
 	verifier := gate.NewVerifier(db)
+
+	// Strict readiness checks (R2): Gate is ready when Postgres, Redis, and
+	// Kafka bootstrap brokers are all reachable.
+	checker := health.NewHealthChecker("gate")
+	checker.AddCheck(func(ctx context.Context) error { return db.PingContext(ctx) })
+	checker.AddCheck(func(ctx context.Context) error { return redis.Ping(ctx) })
+	checker.AddCheck(func(ctx context.Context) error { return producer.Ping(ctx) })
+
+	// Startup grace: wait up to 20s for dependencies before serving traffic.
+	if err := health.WaitForChecks(ctx, checker, 20*time.Second); err != nil {
+		log.Fatal().Err(err).Msg("gate startup: dependencies not ready")
+	}
 
 	mux := http.NewServeMux()
 
 	// Health check
-	checker := health.NewHealthChecker("gate")
 	mux.HandleFunc("/healthz", checker.HealthzHandler())
 	mux.HandleFunc("/readyz", checker.ReadyzHandler())
 
@@ -85,8 +103,9 @@ func main() {
 		json.NewEncoder(w).Encode(resp)
 	})
 
-	// GET /api/wristband/qr-token — generate HMAC-signed QR payload
-	mux.HandleFunc("/api/wristband/qr-token", func(w http.ResponseWriter, r *http.Request) {
+	// GET /api/wristband/scan-visitor-qr-token — generate HMAC-signed QR payload.
+	// Business meaning: gate staff requests a one-time QR token (30s rotation) for the visitor to present.
+	mux.HandleFunc("/api/wristband/scan-visitor-qr-token", func(w http.ResponseWriter, r *http.Request) {
 		token := gate.GenerateQROTP(cfg.Gate)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(token)

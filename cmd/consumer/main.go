@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,8 +14,10 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/Logiqode/ThemeParkNFT/internal/config"
+	"github.com/Logiqode/ThemeParkNFT/internal/health"
 	internalKafka "github.com/Logiqode/ThemeParkNFT/internal/kafka"
 	"github.com/Logiqode/ThemeParkNFT/internal/models"
+	"github.com/Logiqode/ThemeParkNFT/internal/pipeline"
 	redisClient "github.com/Logiqode/ThemeParkNFT/internal/redis"
 )
 
@@ -35,40 +38,33 @@ func main() {
 	redis := redisClient.NewClient(cfg.Redis)
 	defer redis.Close()
 
-	handler := func(ctx context.Context, event *models.ScanEvent) error {
-		// Deduplication shield
-		isDup, err := redis.IsDuplicate(ctx, event.TraceID)
-		if err != nil {
-			return err
-		}
-		if isDup {
-			log.Debug().Str("trace_id", event.TraceID).Msg("duplicate dropped")
-			return nil
-		}
+	// Strict readiness checks (R2): Consumer is ready when Kafka brokers,
+	// Redis, and Postgres are all reachable.
+	checker := health.NewHealthChecker("consumer")
+	checker.AddCheck(func(ctx context.Context) error { return redis.Ping(ctx) })
+	checker.AddCheck(func(ctx context.Context) error { return db.PingContext(ctx) })
 
-		// Persist to Postgres (idempotent via trace_id UNIQUE)
-		_, err = db.ExecContext(ctx,
-			`INSERT INTO scan_events (trace_id, user_id, ticket_id, ride_id, scanned_at)
-			 VALUES ($1, (SELECT id FROM users WHERE email = $2 LIMIT 1), $3, $4, $5)
-			 ON CONFLICT (trace_id) DO NOTHING`,
-			event.TraceID, event.UserID, "", event.RideID, time.UnixMilli(event.Timestamp))
-		if err != nil {
-			log.Error().Err(err).Str("trace_id", event.TraceID).Msg("pg insert failed")
-			return err
-		}
+	// Kafka readiness is verified via the consumer's own broker dial.
+	consumer0 := internalKafka.NewConsumer(cfg.Kafka, cfg.Kafka.ConsumerGroup, func(ctx context.Context, event *models.ScanEvent) error { return nil }, 1)
+	checker.AddCheck(func(ctx context.Context) error { return consumer0.Ping(ctx) })
 
-		// Aggregate into Redis Set (daily)
-		date := time.UnixMilli(event.Timestamp).Format("2006-01-02")
-		if err := redis.AddRideToUserSet(ctx, event.UserID, event.RideID, date); err != nil {
-			log.Error().Err(err).Str("user_id", event.UserID).Str("ride_id", event.RideID).Msg("redis aggregation failed")
-			return err
-		}
-
-		log.Debug().Str("trace_id", event.TraceID).Str("user_id", event.UserID).Str("ride_id", event.RideID).Msg("scan processed")
-		return nil
+	// Startup grace: wait up to 20s for dependencies before consuming.
+	if err := health.WaitForChecks(ctx, checker, 20*time.Second); err != nil {
+		log.Fatal().Err(err).Msg("consumer startup: dependencies not ready")
 	}
 
-	consumer := internalKafka.NewConsumer(cfg.Kafka, cfg.Kafka.ConsumerGroup, handler, 10)
+	// Consumer health server on :8081 (headless Kafka worker — health only).
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("/healthz", checker.HealthzHandler())
+	healthMux.HandleFunc("/readyz", checker.ReadyzHandler())
+	healthSrv := &http.Server{Addr: ":8081", Handler: healthMux}
+	go func() { log.Info().Msg("consumer health API listening on :8081"); _ = healthSrv.ListenAndServe() }()
+	defer healthSrv.Close()
+
+	// Shared production handler: dedup → persist → aggregate (internal/pipeline).
+	scanHandler := pipeline.NewScanHandler(db, redis)
+
+	consumer := internalKafka.NewConsumer(cfg.Kafka, cfg.Kafka.ConsumerGroup, scanHandler.Handle, 10)
 	if err := consumer.Run(ctx); err != nil {
 		log.Fatal().Err(err).Msg("consumer failed")
 	}

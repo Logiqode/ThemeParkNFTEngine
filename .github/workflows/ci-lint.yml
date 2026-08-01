@@ -32,6 +32,24 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      kafka:
+        image: bitnami/kafka:3.7.0
+        ports:
+          - 29092:9092
+        env:
+          KAFKA_CFG_NODE_ID: 1
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:29092
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          ALLOW_PLAINTEXT_LISTENER: "yes"
+        options: >-
+          --health-cmd "kafka-broker-api-versions --bootstrap-server localhost:9092"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -45,8 +63,8 @@ jobs:
           version: v2.12.2
       - name: Build
         run: make build
-      - name: Test
-        run: make test
+      - name: Test (unit)
+        run: go test ./... -coverprofile=coverage.txt -count=1
         env:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: 5432
@@ -55,3 +73,23 @@ jobs:
           POSTGRES_DB: themepark
           REDIS_HOST: localhost
           REDIS_PORT: 6379
+          KAFKA_BROKERS: localhost:29092
+      - name: Test (integration smoke)
+        run: go test -tags=integration ./internal/pipeline -coverprofile=coverage-integration.txt -count=1
+        env:
+          INTEGRATION: "1"
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: themepark
+          POSTGRES_PASSWORD: themepark_dev
+          POSTGRES_DB: themepark
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          KAFKA_BROKERS: localhost:29092
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.txt
+            coverage-integration.txt

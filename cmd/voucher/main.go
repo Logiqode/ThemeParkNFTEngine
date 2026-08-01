@@ -39,8 +39,18 @@ func main() {
 	defer redis.Close()
 	repo := postgres.NewRepository(db)
 
-	mux := http.NewServeMux()
+	// Strict readiness checks (R2): Voucher is ready when Postgres and Redis
+	// are both reachable.
 	checker := health.NewHealthChecker("voucher")
+	checker.AddCheck(func(ctx context.Context) error { return db.PingContext(ctx) })
+	checker.AddCheck(func(ctx context.Context) error { return redis.Ping(ctx) })
+
+	// Startup grace: wait up to 20s for dependencies before serving traffic.
+	if err := health.WaitForChecks(ctx, checker, 20*time.Second); err != nil {
+		log.Fatal().Err(err).Msg("voucher startup: dependencies not ready")
+	}
+
+	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", checker.HealthzHandler())
 	mux.HandleFunc("/readyz", checker.ReadyzHandler())
 
