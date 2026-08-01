@@ -20,7 +20,7 @@
 - [x] **H5.** Local replication of the GH service container with the exact env/port/health flags from the workflow → poll `docker inspect --format '{{.State.Health.Status}}'` until `healthy`; then `docker rm -f` + network cleanup. (Stop local compose kafka first — host port 29092 must be free, R5 default.) → **PASS: `healthy` on first poll, `Kafka Server started`, generated cluster id accepted.**
 - [x] **H6.** Local M2.1 gate against that container: `INTEGRATION=1 KAFKA_BROKERS=localhost:29092 KAFKA_TOPIC_RIDE_SCANS=ride-scans go test -tags=integration ./internal/kafka -run TestIntegrationDelivery -count=1` → **PASS (`ok … 17.2s`, 1000/1000, 0 dups)** — after surfacing the second latent failure (missing topic; see H9).
 - [x] **H9.** *(discovered by H6)* Add `Create Kafka topics` step to both workflows (`docker exec` into the GH service container, `kafka-topics --create --if-not-exists … ride-scans --partitions 6`) — CI equivalent of local `kafka-init`. Verified locally against the replica.
-- [ ] **H7.** Commit; **user pushes** (`git push origin main` — sandbox has no GH creds); confirm both workflows green.
+- [ ] **H7.** Commit (**done: `e8c684d`**); **user pushes** (`git push origin main` — sandbox has no GH creds); confirm both workflows green.
 - [x] **H8.** Update memory bank (`progress.md` CI blocker entry, `activeContext.md` resolved defects).
 
 ### Alternatives considered
