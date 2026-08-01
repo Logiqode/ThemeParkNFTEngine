@@ -52,6 +52,11 @@ func main() {
 	if err := health.WaitForChecks(ctx, checker, 20*time.Second); err != nil {
 		log.Fatal().Err(err).Msg("consumer startup: dependencies not ready")
 	}
+	// The readiness-only consumer is no longer needed; close its reader to
+	// avoid leaking a Kafka group + broker connection.
+	if err := consumer0.Close(); err != nil {
+		log.Warn().Err(err).Msg("closing readiness consumer failed (non-fatal)")
+	}
 
 	// Consumer health server on :8081 (headless Kafka worker — health only).
 	healthMux := http.NewServeMux()

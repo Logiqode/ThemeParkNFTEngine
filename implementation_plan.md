@@ -185,7 +185,7 @@ theme-park-nft-engine/
 
 ## Week 1 — Local Infrastructure & Scaffolding
 
-**Goal:** Bootable local dev environment with all backing services containerized. **Status: 90% — gap-closure list below.**
+**Goal:** Bootable local dev environment with all backing services containerized. **Status: Gap closure (R1–R8, R16, R17a) DONE — only M1.1/M1.2 live-stack verification remains.**
 
 ### Done (verified 2026-08-01)
 - [x] Go module `github.com/Logiqode/ThemeParkNFT`, Go 1.26.5, exact-pinned deps.

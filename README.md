@@ -23,7 +23,7 @@
 | Service | Port | Description |
 |---|---|---|
 | **Gate API** | `8080` | QR token generation, ticket verification, turnstile confirmation |
-| **Consumer** | — | Kafka consumer: deduplication, persistence, aggregation |
+| **Consumer** | `8081` (health only) | Kafka consumer: deduplication, persistence, aggregation |
 | **Load Generator** | — | Test harness: produces synthetic scan events into Kafka |
 | **Minter** | `8083` | End-of-day batch NFT minting + zkLogin authentication |
 | **Voucher** | `8084` | Voucher purchase, sharing, and JIT claim system |
@@ -163,11 +163,13 @@ make build
 # 4. Start infrastructure (Postgres, Redis, Kafka, ZooKeeper, OTel)
 make up
 
-# 5. Verify infrastructure is healthy
-docker compose -f deployments/docker-compose.yml ps
-# Should show all services with (healthy) status and port mappings
+# 5. Wait until the whole compose stack is healthy (< 60s)
+make healthy
 
-# 6. Source environment variables and start services (in separate terminals)
+# 6. Apply database migrations (idempotent — safe to run again)
+make migrate-up
+
+# 7. Source environment variables and start services (in separate terminals)
 set -a && source .env && set +a
 
 # Terminal 1 — Gate API
@@ -210,6 +212,9 @@ Copy `.env.example` to `.env` and configure:
 ```bash
 # Gate API
 curl http://localhost:8080/healthz
+
+# Consumer (headless Kafka worker — health only)
+curl http://localhost:8081/healthz
 
 # Minter
 curl http://localhost:8083/healthz

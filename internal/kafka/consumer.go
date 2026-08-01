@@ -54,6 +54,12 @@ func (c *Consumer) Ping(ctx context.Context) error {
 	return nil
 }
 
+// Close closes the underlying Kafka reader. Safe to call on an unused reader
+// (e.g. a readiness-only consumer instance).
+func (c *Consumer) Close() error {
+	return c.reader.Close()
+}
+
 // Run starts consuming messages with a worker pool.
 func (c *Consumer) Run(ctx context.Context) error {
 	log.Info().Int("workers", c.workers).Msg("kafka consumer starting")
