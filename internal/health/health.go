@@ -38,11 +38,17 @@ func (h *HealthChecker) AddCheck(c Checker) {
 func writeStatus(w http.ResponseWriter, code int, status string, service string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(Status{
+	// Marshal to bytes first so an encoding error does not leave a partial body.
+	body, err := json.Marshal(Status{
 		Status:    status,
 		Service:   service,
 		Timestamp: time.Now().UnixMilli(),
 	})
+	if err != nil {
+		_, _ = w.Write([]byte("{\"status\":\"unhealthy\"}"))
+		return
+	}
+	_, _ = w.Write(body)
 }
 
 // HealthzHandler is a pure liveness probe: the process is up and serving HTTP.

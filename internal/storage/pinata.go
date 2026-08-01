@@ -79,7 +79,7 @@ func (p *PinataClient) PinFile(ctx context.Context, filename string, content []b
 	if err != nil {
 		return "", "", fmt.Errorf("pinata pinFile request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -127,7 +127,7 @@ func (p *PinataClient) PinJSON(ctx context.Context, name string, data interface{
 	if err != nil {
 		return "", "", fmt.Errorf("pinata pinJSON request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)

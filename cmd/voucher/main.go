@@ -33,10 +33,10 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("postgres connect failed")
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	redis := redisClient.NewClient(cfg.Redis)
-	defer redis.Close()
+	defer func() { _ = redis.Close() }()
 	repo := postgres.NewRepository(db)
 
 	// Strict readiness checks (R2): Voucher is ready when Postgres and Redis
@@ -64,7 +64,10 @@ func main() {
 			PurchaserEmail string `json:"purchaser_email"`
 			Quantity       int    `json:"quantity"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
 		user, err := repo.CreateUser(r.Context(), req.PurchaserEmail)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -75,19 +78,22 @@ func main() {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"voucher_ids": ids})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"voucher_ids": ids})
 	})
 
 	// POST /api/vouchers/share — generate magic link (JWT)
 	mux.HandleFunc("/api/vouchers/share", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ VoucherID string `json:"voucher_id"` }
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 			"voucher_id": req.VoucherID,
 			"exp":        time.Now().Add(24 * time.Hour).Unix(),
 		})
 		tokenStr, _ := token.SignedString([]byte(cfg.Gate.HMACSecret))
-		json.NewEncoder(w).Encode(map[string]string{"magic_link": "https://themepark.app/claim?token=" + tokenStr})
+		_ = json.NewEncoder(w).Encode(map[string]string{"magic_link": "https://themepark.app/claim?token=" + tokenStr})
 	})
 
 	// GET /api/vouchers/claim?token=... — JIT claim
@@ -114,11 +120,11 @@ func main() {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "claimed", "user_id": email})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "claimed", "user_id": email})
 	})
 
 	srv := &http.Server{Addr: ":8084", Handler: mux}
 	go func() { log.Info().Msg("voucher API listening on :8084"); _ = srv.ListenAndServe() }()
 	<-ctx.Done()
-	srv.Shutdown(context.Background())
+	_ = srv.Shutdown(context.Background())
 }

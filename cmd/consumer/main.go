@@ -33,10 +33,10 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("postgres connect failed")
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	redis := redisClient.NewClient(cfg.Redis)
-	defer redis.Close()
+	defer func() { _ = redis.Close() }()
 
 	// Strict readiness checks (R2): Consumer is ready when Kafka brokers,
 	// Redis, and Postgres are all reachable.
@@ -64,7 +64,7 @@ func main() {
 	healthMux.HandleFunc("/readyz", checker.ReadyzHandler())
 	healthSrv := &http.Server{Addr: ":8081", Handler: healthMux}
 	go func() { log.Info().Msg("consumer health API listening on :8081"); _ = healthSrv.ListenAndServe() }()
-	defer healthSrv.Close()
+	defer func() { _ = healthSrv.Close() }()
 
 	// Shared production handler: dedup → persist → aggregate (internal/pipeline).
 	scanHandler := pipeline.NewScanHandler(db, redis)

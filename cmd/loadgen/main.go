@@ -43,7 +43,7 @@ func main() {
 		Msg("load generator starting")
 
 	producer := internalKafka.NewProducer(cfg.Kafka)
-	defer producer.Close()
+	defer func() { _ = producer.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), *duration)
 	defer cancel()

@@ -187,7 +187,9 @@ func (c *Client) MintBatchAttendance(ctx context.Context, suiAddress string, rid
 func toDateU64(date string) uint64 {
 	date = strings.ReplaceAll(date, "-", "")
 	var d uint64
-	fmt.Sscanf(date, "%d", &d)
+	if _, err := fmt.Sscanf(date, "%d", &d); err != nil {
+		return 0
+	}
 	return d
 }
 

@@ -34,7 +34,7 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("open postgres")
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	driver, err := postgres.WithInstance(db, &postgres.Config{})
 	if err != nil {

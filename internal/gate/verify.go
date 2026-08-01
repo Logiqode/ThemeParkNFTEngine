@@ -25,7 +25,7 @@ func (v *Verifier) VerifyTicket(ctx context.Context, ticketID string) (*models.G
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback() // safe to call even after commit
+	defer func() { _ = tx.Rollback() }() // safe to call even after commit
 
 	// SELECT ... FOR UPDATE locks the row for the duration of the transaction.
 	var ticket models.Ticket

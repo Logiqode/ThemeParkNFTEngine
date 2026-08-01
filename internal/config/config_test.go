@@ -42,7 +42,7 @@ func TestLoadEnvOverrides(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	t.Setenv("REQUIRED_A", "x")
-	os.Unsetenv("REQUIRED_B")
+	_ = os.Unsetenv("REQUIRED_B")
 
 	cfg := &Config{}
 	if err := cfg.Validate("REQUIRED_A"); err != nil {

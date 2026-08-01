@@ -3,6 +3,9 @@ package storage
 import (
 	"fmt"
 	"strings"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // NFTMetadata is the standard NFT metadata JSON schema used by marketplaces and explorers.
@@ -38,14 +41,14 @@ func RideName(rideID string) string {
 	if name, ok := rideNames[rideID]; ok {
 		return name
 	}
-	// Capitalize for unknown ride IDs
-	return strings.Title(strings.ReplaceAll(rideID, "-", " "))
+	// Capitalize for unknown ride IDs (cases.Title handles Unicode correctly).
+	return cases.Title(language.Und).String(strings.ReplaceAll(rideID, "-", " "))
 }
 
 // BuildMetadata creates a standard NFT metadata JSON payload for a specific ride and date.
 // imageURL should be an ipfs:// URI pointing to the ride's artwork.
 func BuildMetadata(rideID, date string, imageURL string) NFTMetadata {
-		name := RideName(rideID)
+	name := RideName(rideID)
 	return NFTMetadata{
 		Name:        fmt.Sprintf("%s — %s", name, displayDate(date)),
 		Description: fmt.Sprintf("Attendance NFT for completing %s on %s", name, displayDate(date)),

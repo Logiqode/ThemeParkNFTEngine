@@ -38,10 +38,10 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("postgres connect failed")
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	redis := redisClient.NewClient(cfg.Redis)
-	defer redis.Close()
+	defer func() { _ = redis.Close() }()
 	repo := postgres.NewRepository(db)
 	sui, err := suiClient.NewClient(cfg.Sui)
 	if err != nil {
@@ -84,7 +84,10 @@ func main() {
 			Email string `json:"email"`
 			Date  string `json:"date"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
 		if req.Email == "" || req.Date == "" {
 			http.Error(w, "email and date required", http.StatusBadRequest)
 			return
@@ -136,7 +139,7 @@ func main() {
 			_ = repo.RecordMint(r.Context(), user.ID, rideID, req.Date, txDigest, 0)
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"tx_digest":     txDigest,
 			"ride_ids":      rideIDs,
 			"metadata_urls": metadataURLs,
@@ -151,7 +154,10 @@ func main() {
 			return
 		}
 		var req struct{ Token string `json:"token"` }
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
 
 		suiAddr, ek, proof, err := sui.DeriveSuiAddressFromJWT(r.Context(), req.Token)
 		if err != nil {
@@ -168,7 +174,7 @@ func main() {
 		}
 		_ = repo.UpdateSuiAccount(r.Context(), user.ID, suiAddr, ek, proof)
 
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"user_id":     fmt.Sprintf("%d", user.ID),
 			"sui_address": suiAddr,
 		})
@@ -177,5 +183,5 @@ func main() {
 	srv := &http.Server{Addr: ":8083", Handler: mux}
 	go func() { log.Info().Msg("minter API listening on :8083"); _ = srv.ListenAndServe() }()
 	<-ctx.Done()
-	srv.Shutdown(context.Background())
+	_ = srv.Shutdown(context.Background())
 }

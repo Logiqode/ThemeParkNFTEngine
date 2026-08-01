@@ -49,7 +49,7 @@ func (c *Consumer) Ping(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("kafka ping broker %s: %w", addr, err)
 		}
-		conn.Close()
+		_ = conn.Close()
 	}
 	return nil
 }

@@ -36,13 +36,13 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("postgres connect failed")
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	redis := redisClient.NewClient(cfg.Redis)
-	defer redis.Close()
+	defer func() { _ = redis.Close() }()
 
 	producer := internalKafka.NewProducer(cfg.Kafka)
-	defer producer.Close()
+	defer func() { _ = producer.Close() }()
 
 	verifier := gate.NewVerifier(db)
 
@@ -81,7 +81,7 @@ func main() {
 		// Check Redis grace window (5s retry cache)
 		if cached, _ := redis.GetGraceWindow(r.Context(), req.TicketID); cached != "" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"allowed": true, "source": "grace_window"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"allowed": true, "source": "grace_window"})
 			return
 		}
 
@@ -100,7 +100,7 @@ func main() {
 		_ = redis.SetGraceWindow(r.Context(), req.TicketID, resultStr)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 
 	// GET /api/wristband/scan-visitor-qr-token — generate HMAC-signed QR payload.
@@ -108,7 +108,7 @@ func main() {
 	mux.HandleFunc("/api/wristband/scan-visitor-qr-token", func(w http.ResponseWriter, r *http.Request) {
 		token := gate.GenerateQROTP(cfg.Gate)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(token)
+		_ = json.NewEncoder(w).Encode(token)
 	})
 
 	// POST /api/gate/confirm — turnstile confirms entry
@@ -118,7 +118,10 @@ func main() {
 			return
 		}
 		var req struct{ TicketID string `json:"ticket_id"` }
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
 		if err := verifier.ConfirmEntry(r.Context(), req.TicketID); err != nil {
 			http.Error(w, "confirm failed", http.StatusInternalServerError)
 			return
@@ -131,5 +134,5 @@ func main() {
 
 	<-ctx.Done()
 	log.Info().Msg("gate shutting down")
-	srv.Shutdown(context.Background())
+	_ = srv.Shutdown(context.Background())
 }
