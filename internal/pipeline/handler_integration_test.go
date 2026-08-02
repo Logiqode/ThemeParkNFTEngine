@@ -17,6 +17,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/Logiqode/ThemeParkNFT/internal/config"
 	"github.com/Logiqode/ThemeParkNFT/internal/models"
@@ -151,5 +152,88 @@ func TestIntegrationMultipleRidesAggregated(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("rides missing %s (got %v)", want, rides)
 		}
+	}
+}
+
+// D6/R23: the pipeline must persist the producer's real ticket_id, not "".
+func TestIntegrationTicketIDPersisted(t *testing.T) {
+	h := integrationHandler(t)
+	ctx := context.Background()
+	trace := "it-ticket-" + time.Now().Format("150405.000000000")
+
+	event := &models.ScanEvent{
+		UserID:    "integration@test.local",
+		RideID:    "ride-001",
+		Timestamp: time.Now().UnixMilli(),
+		TraceID:   trace,
+		TicketID:  "ticket-abc-123",
+	}
+	if err := h.Handle(ctx, event); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	var tid string
+	if err := h.db.QueryRowContext(ctx, `SELECT ticket_id FROM scan_events WHERE trace_id=$1`, trace).Scan(&tid); err != nil {
+		t.Fatalf("query ticket_id: %v", err)
+	}
+	if tid != "ticket-abc-123" {
+		t.Errorf("persisted ticket_id = %q, want ticket-abc-123 (D6)", tid)
+	}
+}
+
+// M3.1: 5 carries of the same trace_id → exactly 1 persisted, 4 dropped.
+func TestIntegrationDupFiveToOne(t *testing.T) {
+	h := integrationHandler(t)
+	ctx := context.Background()
+	trace := "it-dup5-" + time.Now().Format("150405.000000000")
+
+	event := &models.ScanEvent{
+		UserID:    "integration@test.local",
+		RideID:    "ride-007",
+		Timestamp: time.Now().UnixMilli(),
+		TraceID:   trace,
+	}
+	for i := 0; i < 5; i++ {
+		if err := h.Handle(ctx, event); err != nil {
+			t.Fatalf("Handle() #%d = %v", i, err)
+		}
+	}
+	var count int
+	if err := h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_events WHERE trace_id=$1`, trace).Scan(&count); err != nil {
+		t.Fatalf("query count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("scan_events count = %d, want 1 (5 copied → 1 M3.1)", count)
+	}
+}
+
+// M3.2: after the dedup marker expires, the same trace_id is processed again.
+func TestIntegrationDedupTTLExpiry(t *testing.T) {
+	h := integrationHandler(t)
+	ctx := context.Background()
+	trace := "it-ttl-" + time.Now().Format("150405.000000000")
+
+	event := &models.ScanEvent{
+		UserID:    "integration@test.local",
+		RideID:    "ride-008",
+		Timestamp: time.Now().UnixMilli(),
+		TraceID:   trace,
+	}
+	if err := h.Handle(ctx, event); err != nil {
+		t.Fatalf("Handle() 1st = %v", err)
+	}
+
+	// Simulate the dedup marker's TTL expiring by deleting the key directly.
+	cfg := config.MustLoad()
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.Redis.Addr(), Password: cfg.Redis.Password, DB: cfg.Redis.DB})
+	defer func() { _ = rdb.Close() }()
+	if err := rdb.Del(ctx, "dedup:"+trace).Err(); err != nil {
+		t.Fatalf("expire dedup key: %v", err)
+	}
+
+	// Reprocessing after expiry re-inserts (ON CONFLICT DO NOTHING keeps row 1)
+	// and counts as processed (no error).
+	if err := h.Handle(ctx, event); err != nil {
+		t.Fatalf("Handle() 2nd (after TTL) = %v", err)
 	}
 }

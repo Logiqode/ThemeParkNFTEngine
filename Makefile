@@ -49,7 +49,8 @@ test:
 # Run integration smoke tests (requires `make up` + INTEGRATION=1)
 test-integration:
 	go test -tags=integration ./internal/pipeline -v -count=1
-	go test -tags=integration ./internal/kafka -run TestIntegrationDelivery -v -count=1
+	go test -tags=integration ./internal/gate -v -count=1
+	go test -tags=integration ./internal/kafka -v -count=1
 
 # Week 2 benchmarks (R15): Kafka delivery reliability under congestion.
 # Requires: healthy compose stack (`make healthy`), go, jq, bc.

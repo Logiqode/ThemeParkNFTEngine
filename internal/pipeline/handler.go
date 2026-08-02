@@ -29,8 +29,13 @@ func NewScanHandler(db *sqlx.DB, redis *redisClient.Client) *ScanHandler {
 }
 
 // Handle processes a single ScanEvent (R11: user_id is the internal email key).
-func (h *ScanHandler) Handle(ctx context.Context, event *models.ScanEvent) error {
-	// Deduplication shield.
+//
+// Reliability contract (R25/D5): once the SETNX dedup marker is claimed, any
+// transient downstream failure (PG insert or Redis aggregate) clears the marker
+// before returning an error, so the consumer's retry re-processes the trace_id
+// instead of dropping it. This preserves effectively-once alongside zero loss.
+func (h *ScanHandler) Handle(ctx context.Context, event *models.ScanEvent) (err error) {
+	// Deduplication shield (SETNX → trace_id marker with TTL).
 	isDup, err := h.redis.IsDuplicate(ctx, event.TraceID)
 	if err != nil {
 		return err
@@ -40,12 +45,23 @@ func (h *ScanHandler) Handle(ctx context.Context, event *models.ScanEvent) error
 		return nil
 	}
 
-	// Persist to Postgres (idempotent via trace_id UNIQUE).
+	// Compensation (R25): on any error after the marker was claimed, drop the
+	// dedup key so a retry reprocesses rather than being filtered as a duplicate.
+	defer func() {
+		if err != nil {
+			if cerr := h.redis.ClearDedup(ctx, event.TraceID); cerr != nil {
+				log.Error().Err(cerr).Str("trace_id", event.TraceID).Msg("failed to clear dedup on error")
+			}
+		}
+	}()
+
+	// Persist to Postgres (idempotent via trace_id UNIQUE). ticket_id is now the
+	// real value from the producer (D6, R23) instead of a hardcoded "".
 	_, err = h.db.ExecContext(ctx,
 		`INSERT INTO scan_events (trace_id, user_id, ticket_id, ride_id, scanned_at)
 		 VALUES ($1, (SELECT id FROM users WHERE email = $2 LIMIT 1), $3, $4, $5)
 		 ON CONFLICT (trace_id) DO NOTHING`,
-		event.TraceID, event.UserID, "", event.RideID, time.UnixMilli(event.Timestamp))
+		event.TraceID, event.UserID, event.TicketID, event.RideID, time.UnixMilli(event.Timestamp))
 	if err != nil {
 		return fmt.Errorf("pg insert: %w", err)
 	}

@@ -278,7 +278,7 @@ theme-park-nft-engine/
 
 ## Week 3 — Gate Access Engine (Wristband Binding) & Redis Deduplication
 
-**Goal:** Synchronous gate verification via the **Rev 1 binding model (R9)**: bind wristband via account QR + NFC transaction check; consume `ride-scans`, deduplicate via Redis. **Gate becomes the production Kafka producer (Q3/R10).** **Status: PLAN LOCKED 2026-08-02 (Rev 2 Q&A) — ready for Act Mode.**
+**Goal:** Synchronous gate verification via the **Rev 1 binding model (R9)**: bind wristband via account QR + NFC transaction check; consume `ride-scans`, deduplicate via Redis. **Gate becomes the production Kafka producer (Q3/R10).** **Status: EXECUTED 2026-08-02 — W3.1–W3.12 DONE, all M3.1–M3.7 integration tests PASS live, E2E curl flow verified (QR→BINDING→BOUND→ride-scan→Kafka→consumer→PG). CI E2E gate (W3.13) + commit pending user push.**
 
 ### Rev 2 Design Decisions — Week 3 Q&A (2026-08-02, user-confirmed)
 
@@ -294,43 +294,43 @@ theme-park-nft-engine/
 | R25 | Dedup compensation: on transient downstream failure after SETNX, handler DELs `dedup:{trace_id}` before returning error (retry reprocesses); PG `UNIQUE(trace_id)` remains durable backstop. | Zero-loss + effectively-once under retries. |
 
 ### Execution Blueprint (W3.1–W3.14)
-- [ ] **W3.1** `internal/models/models.go`: `ScanEvent.TicketID` (`json:"ticket_id,omitempty"`); `WristbandBinding{WristbandUID, TicketID, UserEmail, Status, BoundAt}` + `BindingStatusBinding`/`BindingStatusBound`.
-- [ ] **W3.2** `internal/redis/client.go`: `BindWristband` (Lua double-SETNX + EXPIREAT end-of-Day+1), `GetBinding`, `GetBindingByTicket`, `SetBindingStatus` (KEEPTTL), `DeleteBinding`, `MarkQRUsed`, `ClearDedup`.
-- [ ] **W3.3** `internal/gate/qr.go`: `QRToken` += `TicketID`; payload `ticketID|uuid|timestamp`; `GenerateQROTP(cfg, ticketID)`; verify = signature + window; update `qr_test.go`.
-- [ ] **W3.4** `internal/gate/binding.go` (NEW — deletes `verify.go` turnstile): `BindingService.Bind/NFCCheck/Reset` (R18–R25; `auth.TxnCheckPerformer` mock via R16; faithful grace replay keyed by wristband).
-- [ ] **W3.5** `internal/gate/ride_scan.go` (NEW): `RideScanService.Scan` → BOUND check → `ScanEvent{email, ride_id, ticket_id, fresh trace_id}` → producer publish (D8) → return trace_id.
-- [ ] **W3.6** `internal/kafka/consumer.go`: manual `CommitMessages` (no CommitInterval), DLQ writer (`cfg.Kafka.TopicDLQ`), retry ×3 backoff, poison→DLQ with error headers, graceful drain (D5).
-- [ ] **W3.7** `internal/pipeline/handler.go`: persist `event.TicketID` (D6); compensation `ClearDedup` on transient failure (R25).
-- [ ] **W3.8** `internal/config/config.go` + `.env.example`: `KAFKA_CONSUMER_MAX_RETRIES=3`, `KAFKA_CONSUMER_BACKOFF_MS=500`, `GATE_TXN_CHECK_FAILWHEN=""` (mock knob).
-- [ ] **W3.9** `cmd/gate/main.go`: remove `/api/gate/verify` + `/api/gate/confirm`; wire `qr-token?ticket_id=`, `bind`, `nfc-check`, `reset`, `/api/rides/scan`.
-- [ ] **W3.10** `cmd/consumer/main.go`: pass retry/DLQ config into consumer.
-- [ ] **W3.11** Tests: `internal/gate/binding_integration_test.go` (M3.4 grace replay, M3.5 concurrent bind one-winner, M3.7 bind→check→reset→re-bind, QR single-use replay); `internal/kafka/consumer_integration_test.go` (M3.1 dup×5→1, M3.2 TTL reprocess, M3.3 poison→DLQ+continue, M3.6 2k-event pool concurrency); pipeline integration += ticket_id persistence.
-- [ ] **W3.12** Live local verification: `make up && make healthy`; curl flow (qr→bind→nfc-check→rides/scan→consumed); `make build`, `go vet`, `golangci-lint run`, unit + integration suites green.
+- [x] **W3.1** `internal/models/models.go`: `ScanEvent.TicketID` (`json:"ticket_id,omitempty"`); `WristbandBinding{WristbandUID, TicketID, UserEmail, Status, BoundAt}` + `BindingStatusBinding`/`BindingStatusBound`.
+- [x] **W3.2** `internal/redis/client.go`: `BindWristband` (Lua double-SETNX + EXPIREAT end-of-Day+1), `GetBinding`, `GetBindingByTicket`, `SetBindingStatus` (KEEPTTL), `DeleteBinding`, `MarkQRUsed`, `ClearDedup`.
+- [x] **W3.3** `internal/gate/qr.go`: `QRToken` += `TicketID`; payload `ticketID|uuid|timestamp`; `GenerateQROTP(cfg, ticketID)`; verify = signature + window; update `qr_test.go`.
+- [x] **W3.4** `internal/gate/binding.go` (NEW — deletes `verify.go` turnstile): `BindingService.Bind/NFCCheck/Reset` (R18–R25; `auth.TxnCheckPerformer` mock via R16; faithful grace replay keyed by wristband).
+- [x] **W3.5** `internal/gate/ride_scan.go` (NEW): `RideScanService.Scan` → BOUND check → `ScanEvent{email, ride_id, ticket_id, fresh trace_id}` → producer publish (D8) → return trace_id.
+- [x] **W3.6** `internal/kafka/consumer.go`: manual `CommitMessages` (no CommitInterval), DLQ writer (`cfg.Kafka.TopicDLQ`), retry ×3 backoff, poison→DLQ with error headers, graceful drain (D5).
+- [x] **W3.7** `internal/pipeline/handler.go`: persist `event.TicketID` (D6); compensation `ClearDedup` on transient failure (R25).
+- [x] **W3.8** `internal/config/config.go` + `.env.example`: `KAFKA_CONSUMER_MAX_RETRIES=3`, `KAFKA_CONSUMER_BACKOFF_MS=500`, `GATE_TXN_CHECK_FAILWHEN=""` (mock knob).
+- [x] **W3.9** `cmd/gate/main.go`: remove `/api/gate/verify` + `/api/gate/confirm`; wire `qr-token?ticket_id=`, `bind`, `nfc-check`, `reset`, `/api/rides/scan`.
+- [x] **W3.10** `cmd/consumer/main.go`: pass retry/DLQ config into consumer.
+- [x] **W3.11** Tests: `internal/gate/binding_integration_test.go` (M3.4 grace replay, M3.5 concurrent bind one-winner, M3.7 bind→check→reset→re-bind, QR single-use replay); `internal/kafka/consumer_integration_test.go` (M3.1 dup×5→1, M3.2 TTL reprocess, M3.3 poison→DLQ+continue, M3.6 2k-event pool concurrency); pipeline integration += ticket_id persistence.
+- [x] **W3.12** Live local verification: `make up && make healthy`; curl flow (qr→bind→nfc-check→rides/scan→consumed); `make build`, `go vet`, `golangci-lint run`, unit + integration suites green.
 - [ ] **W3.13** CI + docs: extend `ci-build.yml` (compose E2E: loadgen 1k w/ 20% dups → assert dedup counts, M3 CI gate); README API section (remove turnstile routes, document wristband API); commit; user push.
 - [ ] **W3.14** Memory bank + plan checkoff.
 
 ### Technical Requirements
-- [ ] `cmd/gate` endpoints (business-aligned naming, R17):
+- [x] `cmd/gate` endpoints (business-aligned naming, R17):
   - `GET /api/wristband/scan-visitor-qr-token` — one-time HMAC QR token (30s rotation) for the visitor to present (renamed from `qr-token`).
   - `POST /api/wristband/bind` — bind wristband (NFC id) to account via scanned QR payload → ticket `PENDING_ENTRY` (BINDING). (NEW)
   - `POST /api/wristband/nfc-check` — run **transaction check** (via `internal/auth.TxnCheckPerformer`, R16): real impl = zkLogin wallet readiness (W6); success → ticket `ACTIVE` (BOUND). (renamed from `verify`)
   - `POST /api/wristband/reset` — admin undo/overwrite on faulty NFC: `ACTIVE|PENDING_ENTRY → CLAIMED` (unbind / re-bind). (R13) (NEW)
   - `POST /api/rides/scan` — ride staff NFC scan during visit → publishes `ScanEvent` to `ride-scans` (production path; simulated web flow target). (NEW)
-- [ ] ~~**Atomic transaction (sqlx.Tx):** SELECT FOR UPDATE~~ **Superseded by R19:** binding state machine lives in Redis (atomic double-SETNX via Lua); PG consulted only for ticket ownership/status at bind.
-- [ ] **5-second Retry Grace Window:** same ticket_id within 5s → cached result (Redis TTL=5s) — fixes the "always allowed" bug (see Known Defects).
-- [ ] **HMAC QR signing:** `internal/gate/qr.go` — payload `[ticketID | UUID | Timestamp | HMAC_SHA256]` (R18), 30s rotation, key from env (`HMAC_SECRET`), one-time use enforced at bind (R21).
-- [ ] **Gate = Kafka producer:** after successful `nfc-check` (BOUND), ride scan (`POST /api/rides/scan`) publishes `ScanEvent` to `ride-scans` with `user_id`=email (internal), `ride_id` from request (R12), W3C traceparent headers.
-- [ ] `cmd/consumer` — **reliability fixes (R14, deferred from W1):** manual commit (`CommitMessages` after handler success), dead-letter topic `ride-scans-dlq` for poison messages, exponential backoff retries on transient PG/Redis failures (max before DLQ), idempotency via `SET dedup:{trace_id} 1 NX EX <ttl>`, worker pool with backpressure.
-- [ ] Retry strategy: exponential backoff for transient Redis failures; max retries before DLQ.
+- [x] ~~**Atomic transaction (sqlx.Tx):** SELECT FOR UPDATE~~ **Superseded by R19:** binding state machine lives in Redis (atomic double-SETNX via Lua); PG consulted only for ticket ownership/status at bind.
+- [x] **5-second Retry Grace Window:** same ticket_id within 5s → cached result (Redis TTL=5s) — fixes the "always allowed" bug (see Known Defects).
+- [x] **HMAC QR signing:** `internal/gate/qr.go` — payload `[ticketID | UUID | Timestamp | HMAC_SHA256]` (R18), 30s rotation, key from env (`HMAC_SECRET`), one-time use enforced at bind (R21).
+- [x] **Gate = Kafka producer:** after successful `nfc-check` (BOUND), ride scan (`POST /api/rides/scan`) publishes `ScanEvent` to `ride-scans` with `user_id`=email (internal), `ride_id` from request (R12), W3C traceparent headers.
+- [x] `cmd/consumer` — **reliability fixes (R14, deferred from W1):** manual commit (`CommitMessages` after handler success), dead-letter topic `ride-scans-dlq` for poison messages, exponential backoff retries on transient PG/Redis failures (max before DLQ), idempotency via `SET dedup:{trace_id} 1 NX EX <ttl>`, worker pool with backpressure.
+- [x] Retry strategy: exponential backoff for transient Redis failures; max retries before DLQ.
 
 ### Testing Milestones
-- [ ] **M3.1** *Duplicate:* same `trace_id` 5× → exactly 1 processed, 4 dropped, Redis key with TTL.
-- [ ] **M3.2** *TTL:* after expiry, same `trace_id` processed again.
-- [ ] **M3.3** *Poison:* malformed JSON → DLQ, consumer continues.
-- [ ] **M3.4** *Grace window:* double-scan within 5s → same (cached) result — **regression: cached result must match original decision** (fixes bug).
-- [ ] **M3.5** *Concurrent binds same ticket* → exactly one BOUND, other rejected (FOR UPDATE lock).
-- [ ] **M3.6** *Concurrency:* 10k events, 5 partitions, pool=10 → no cross-worker duplicates.
-- [ ] **M3.7** *(NEW R9/R13) Binding flow:* QR bind → txn check pass → ACTIVE; mock check fail → reset → re-bind succeeds.
+- [x] **M3.1** *Duplicate:* same `trace_id` 5× → exactly 1 processed, 4 dropped, Redis key with TTL.
+- [x] **M3.2** *TTL:* after expiry, same `trace_id` processed again.
+- [x] **M3.3** *Poison:* malformed JSON → DLQ, consumer continues.
+- [x] **M3.4** *Grace window:* double-scan within 5s → same (cached) result — **regression: cached result must match original decision** (fixes bug).
+- [x] **M3.5** *Concurrent binds same ticket* → exactly one BOUND, other rejected (FOR UPDATE lock).
+- [x] **M3.6** *Concurrency:* 10k events, 5 partitions, pool=10 → no cross-worker duplicates.
+- [x] **M3.7** *(NEW R9/R13) Binding flow:* QR bind → txn check pass → ACTIVE; mock check fail → reset → re-bind succeeds.
 
 ### CI/CD Milestones
 - [ ] **CI gate:** integration job spins compose + loadgen(1k events w/ 20% dups) → assert dedup count.

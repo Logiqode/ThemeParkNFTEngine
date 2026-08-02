@@ -223,22 +223,46 @@ curl http://localhost:8083/healthz
 curl http://localhost:8084/healthz
 ```
 
-### Gate API (port 8080)
+### Gate API (port 8080) — Wristband Binding Flow (Rev 1)
+
+The gate implements the **Rev 1 binding model**: a visitor's account QR is bound
+to a wristband NFC id by gate staff, the wristband is NFC-checked (transaction
+check), and confirmed ride scans publish `ScanEvent`s to Kafka.
 
 ```bash
-# Generate a QR token (gate staff: one-time HMAC QR for the visitor to present)
-curl http://localhost:8080/api/wristband/scan-visitor-qr-token
+# 0. Seed a user + claimed ticket (assumes a fresh DB):
+#    INSERT INTO users (email) VALUES ('alice@test.com');
+#    INSERT INTO tickets (ticket_id, user_id, status)
+#      SELECT 'ticket-001', id, 'CLAIMED' FROM users WHERE email='alice@test.com';
 
-# Verify a ticket
-curl -X POST http://localhost:8080/api/gate/verify \
-  -H "Content-Type: application/json" \
-  -d '{"ticket_id":"test-001"}'
+# 1a. Staff requests a one-time HMAC QR token (30s rotation) for the ticket.
+curl "http://localhost:8080/api/wristband/scan-visitor-qr-token?ticket_id=ticket-001"
 
-# Confirm turnstile entry
-curl -X POST http://localhost:8080/api/gate/confirm \
+# 1b. Bind wristband NFC id to the ticket (ticket → BINDING). One-time QR (R21).
+curl -X POST http://localhost:8080/api/wristband/bind \
   -H "Content-Type: application/json" \
-  -d '{"ticket_id":"test-001"}'
+  -d '{"ticket_id":"ticket-001","qr_uuid":"<uuid>","qr_timestamp":<ts>,"qr_signature":"<sig>","wristband_uid":"wb-001"}'
+
+# 2. NFC transaction check (mock now; real zkLogin in W6) → BOUND (R16).
+curl -X POST http://localhost:8080/api/wristband/nfc-check \
+  -H "Content-Type: application/json" \
+  -d '{"wristband_uid":"wb-001"}'
+
+# 3. Ride staff NFC scan during the visit → publishes ScanEvent to Kafka (D8).
+curl -X POST http://localhost:8080/api/rides/scan \
+  -H "Content-Type: application/json" \
+  -d '{"wristband_uid":"wb-001","ride_id":"ride-001"}'
+
+# 4. Admin undo/overwrite on faulty NFC → unbind, ticket back to CLAIMED.
+curl -X POST http://localhost:8080/api/wristband/reset \
+  -H "Content-Type: application/json" \
+  -d '{"wristband_uid":"wb-001"}'
 ```
+
+*Old turnstile routes (`/api/gate/verify`, `/api/gate/confirm`) were removed in
+Week 3 — the `BOUND` transition is handled by `nfc-check` and ride scans by
+`/api/rides/scan`.*
+
 
 ### Voucher System (port 8084)
 

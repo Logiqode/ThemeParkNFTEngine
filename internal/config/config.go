@@ -78,6 +78,12 @@ type KafkaConfig struct {
 	// surfaces (errors surface via the writer's error channel / stats). Load
 	// tests default to sync so per-batch delivery success is directly measured.
 	ProducerAsync bool `envconfig:"KAFKA_PRODUCER_ASYNC" default:"false"`
+	// ConsumerMaxRetries is how many times a transient handler failure is retried
+	// (exponential backoff) before the message is routed to the DLQ (R14/D5).
+	ConsumerMaxRetries int `envconfig:"KAFKA_CONSUMER_MAX_RETRIES" default:"3"`
+	// ConsumerBackoffMS is the base backoff (ms) between handler retries; it
+	// doubles each attempt (0.5s → 1s → 2s).
+	ConsumerBackoffMS int `envconfig:"KAFKA_CONSUMER_BACKOFF_MS" default:"500"`
 }
 
 // BrokerList returns the brokers as a slice.
@@ -88,6 +94,10 @@ func (k KafkaConfig) BrokerList() []string {
 type GateConfig struct {
 	HMACSecret        string `envconfig:"HMAC_SECRET"`
 	QRRotationSeconds int    `envconfig:"QR_ROTATION_SECONDS" default:"30"`
+	// TxnCheckFailWhen is the mock transaction-check knob (R16): when it matches
+	// the account reference, the NFC check fails. Empty = never fail. The real
+	// zkLogin implementation (Week 6) ignores this.
+	TxnCheckFailWhen string `envconfig:"GATE_TXN_CHECK_FAILWHEN" default:""`
 }
 
 type SuiConfig struct {
