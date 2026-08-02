@@ -2,7 +2,7 @@
 
 > **Status:** Active — Living document. Check off `[x]` as each milestone completes.
 > **Mode:** ACT MODE execution. Single developer, 8-week sprint.
-> **Last updated:** 2026-08-02 — Week 1 gap review + business-flow redesign (NFC wristband binding, right-to-be-forgotten, benchmark scripts); **Hotfix H: CI Kafka KRaft `CLUSTER_ID` executed** (local verification PASS; push pending).
+> **Last updated:** 2026-08-02 — Week 1 gap review + business-flow redesign (NFC wristband binding, right-to-be-forgotten, benchmark scripts); **Hotfix H: CI Kafka KRaft `CLUSTER_ID` executed** (local verification PASS; push pending); **Week 3 executed (wristband binding engine + reliable consumer)**; **Rev 3 family voucher & participant model LOCKED** (design Q&A).
 
 ---
 
@@ -340,21 +340,48 @@ theme-park-nft-engine/
 
 ---
 
-## Week 4 — Postgres Persistence, Redis Aggregation & Ticket Voucher System
+## Rev 3 Design Decisions — Family Voucher & Participant Model (2026-08-02, user-confirmed via design Q&A)
 
-**Goal:** Persist valid scans to Postgres; aggregate per-user ride sets in Redis; implement ticket voucher lifecycle.
+**Business flow:** a family buys park tickets (e.g. dad buys 4: himself, wife, 2 kids). Dad delegates each ticket to a family member. **Vouchers are the delegation unit.** The design was developed to solve: infants/toddlers/elderly who have no (usable) Google account / email, not blocking the turnstile line, and right-to-be-forgotten. These override/refine Q6, R11, R13, R16 where noted.
+
+| ID | Decision | Notes |
+|----|----------|-------|
+| R26 | **Participant ≠ account/wallet.** Introduce a `participant` (a person) distinct from a login/wallet. The gate's wristband bind targets a participant. | Core refactor enabling the family model. |
+| R27 | **Voucher = delegation unit.** `purchase` creates N participant-bound vouchers; the buyer allocates each to a participant (email → own account, or "add family member / dependent"). Ownership = participant, with a guardian who may act for them. | Refines Q6/R13 voucher framing. |
+| R28 | **Two delegation modes.** (a) **Account-linked:** delegate to an email with Google zkLogin → own non-custodial wallet. (b) **Dependent:** person with no account (child/infant/elderly) → a **custodial-proxy wallet** held by a guardian. | Solves toddlers & non-technical elderly. |
+| R29 | **Gate decoupled from wallet existence.** `/api/wristband/nfc-check` confirms rightful entrant + entitlement + presence; wallet readiness is a **soft (warn, never block)** signal, not a gate. Nothing is resolved in line. | Re-scopes R16 txn check; kills the line-jam. |
+| R30 | **Wallet attached later (eventually-linked).** Mint-time wallet resolution per participant: (1) own non-custodial, (2) dependent custodial-proxy, (3) adult JIT (attach wallet → mint). | End-of-day async mint; no blockchain wallet needed at the gate. |
+| R31 | **Dependents mint immediately into the guardian wallet.** Because a guardian always has a wallet, dependents' NFTs are minted at end-of-day into the custodial wallet — NOT held in a forever-pending state. The "3-month Claim window" is an *opportunity*, not a deadline. | Avoids indefinite pending. |
+| R32 | **`pending_mints` = durable attribution ledger, not a cache.** Lives in Postgres, keyed to `participant`, durably retains (participant, ride_ids, scanned_at, date). Never tied to ephemeral Redis TTL (48h) or the disposable wristband (end of Day+1). Rebuildable at any time from `scan_events` (the true durable source). Kept by default; deletable on request (GDPR). | Answers "where does the ride data sit". |
+| R33 | **Transfer later = on-chain NFT object transfer.** When a dependent later links their own Google account, a `claim custody` action transfers the NFT from the custodial wallet to their own non-custodial wallet (Sui object transfer — Move allows transfer, Q7). Off-chain attribution updated. Works over a multi-year timeline. | Dad→kid whenever they're ready. |
+| R34 | **Right-to-be-forgotten (R11 extended).** On-chain + IPFS carry **no PII** (Sui address, ride_id, date, ride display name only). The person↔token link lives **only** in Postgres and is deletable. PII rules are an *enabler*: all linking is confined off-chain, never on-chain. | Confirmed by user. |
+| R35 | **Guardian (family) custodial wallet is separate** from the guardian's personal zkLogin wallet — a dedicated family/guardian Sui address, keys server-side/encrypted. Keeps dependents' tokens segregable and cleanly transferable to each owner. | Recommended; prevents commingling. |
+
+**Data durability split (as settled):**
+- Durable (Postgres): `scan_events` (per event), `rides`, `participants` (name, guardian_id, wallet_state), `pending_mints` (attribution ledger), `mint_logs`, `tickets`/`ticket_vouchers`.
+- Ephemeral (disposable by design): Redis `bind:wristband:{uid}` (end of Day+1), Redis `user:*:rides:{date}` (48h cache, rebuildable), dedup keys, QR one-time keys.
+- **Nothing value-bearing is lost when the wristband/Redis is thrown away** — they are caches/pointers, never the source of truth.
+
+---
+
+## Week 4 — Postgres Persistence, Redis Aggregation, Family Voucher & Participant System
+
+**Goal:** Persist valid scans to Postgres; aggregate per-user ride sets in Redis (cache); implement the **Rev 3 family voucher / participant model** (R26–R35). **Status: DESIGN LOCKED 2026-08-02 (Rev 3) — ready for Act Mode.**
 
 ### Technical Requirements
 - [ ] `internal/postgres`: repository pattern, `ScanRepository.Insert` (idempotent on `trace_id` UNIQUE constraint), `pgx` pool.
-- [ ] Migrations v2 (`0002_*` via golang-migrate, R1): add migration for `UNIQUE(trace_id)` (schema already has it — verify consistency), `CHECK` constraints on `ride_id` enum, ticket status enum (already v1; align with R13 machine).
-- [ ] Redis Set aggregation: `SADD user:{user_id}:rides {ride_id}` per valid scan; daily key `user:{user_id}:rides:{date}` TTL 48h.
+- [ ] Migrations v2 (`0002_*` via golang-migrate, R1): verify `UNIQUE(trace_id)`; `CHECK` constraints on `ride_id`; ticket status enum aligned with R13; **new `participants`** (id, guardian_id, name, account_email nullable, wallet_state enum `NONE|OWN_NON_CUSTODIAL|CUSTODIAL_PROXY`, timestamps) and **`pending_mints`** (id, participant_id, ride_ids jsonb, scanned_ats timestamptz[], mint_date, wallet_state, created_at — durable attribution ledger, R32).
+- [ ] Redis Set aggregation: `SADD user:{user_id}:rides {ride_id}` per valid scan; daily key `user:{user_id}:rides:{date}` TTL 48h (cache only — rebuildable from `scan_events`).
 - [ ] Transactional boundary: insert Postgres → SADD Redis; on Redis failure, compensate or mark for retry (outbox pattern).
 - [ ] Batch insert optimization (batch size configurable).
-- [ ] **Ticket Voucher System (`internal/voucher`, `cmd/voucher`):**
-  - `POST /api/vouchers/purchase` → N voucher rows (`status='unclaimed'`, `purchaser_id`).
+- [ ] **Family Voucher / Participant System (`internal/voucher`, `cmd/voucher`):**
+  - `POST /api/vouchers/purchase` → N voucher rows (`UNCLAIMED`, `purchaser_id`).
+  - `POST /api/vouchers/delegate` → allocate a voucher to a participant: mode `account` (account_email) or `dependent` (name + guardian_id → custodial-proxy wallet) (R27/R28).
   - `POST /api/vouchers/share` → magic link (signed JWT with `voucher_id`).
-  - `GET /api/vouchers/claim?token=...` → JIT registration → ticket state `UNCLAIMED → CLAIMED` (R13).
-  - State machine per R13.
+  - `GET /api/vouchers/claim?token=...` → JIT registration → voucher/ticket `UNCLAIMED → CLAIMED` (R13).
+  - Participant has a `guardian_id` and `wallet_state`; dependents get a custodial wallet reference (R35).
+- [ ] **Minter mint resolution (R30/R31):** per participant, resolve wallet (own → custodial → pending). Dependents mint immediately into guardian custodial wallet; unresolved adults write a durable `pending_mints` row at end-of-day (R32). Idempotent via `mint_logs` UNIQUE(user_id, ride_id, mint_date) — still works keyed by participant/guardian.
+- [ ] **Custody transfer (R33):** `POST /mint/claim-custody` — transfer NFT from custodial wallet to a dependent's newly-linked non-custodial wallet (Sui object transfer) + update attribution. *(Week 6 real Sui transfer; stub/mock now.)*
 
 ### Testing Milestones
 - [ ] **M4.1** *Persistence:* 5k valid events → PG row count == 5k, no dups, indexes performant.
@@ -364,12 +391,16 @@ theme-park-nft-engine/
 - [ ] **M4.5** *Voucher:* purchase 8 → 8 `unclaimed` → claim 1 → `claimed`.
 - [ ] **M4.6** *Magic link expired/invalid* → rejected.
 - [ ] **M4.7** *(R13) Ticket state transitions:* claim → QR bind → txn check → ACTIVE → ride scan → USED.
+- [ ] **M4.8** *(NEW Rev 3) Delegation (account-linked):* dad buys 4 → delegates 1 to wife's email → wife claims → own non-custodial wallet → mint lands in her wallet.
+- [ ] **M4.9** *(NEW Rev 3) Dependent (no account):* dad delegates to a child `dependent` → custodial-proxy wallet → wristband binds to child participant → gate passes with NO wallet → mint attributed to child in guardian wallet.
+- [ ] **M4.10** *(NEW Rev 3) Durable pending/attribution:* unresolved adult → `pending_mints` row persisted at end-of-day; re-aggregation from `scan_events` after Redis TTL yields the same ride set; row lives independently of Redis/wristband lifetime.
+- [ ] **M4.11** *(NEW Rev 3) Custody transfer:* dependent links Google later → NFT object transferred from custodial wallet to their own wallet; attribution updated.
 
 ### CI/CD Milestones
 - [ ] **CI gate:** full pipeline integration test in CI; **coverage gate ≥ 70% on `internal/`** (R4).
 
 ### Deliverables
-- [ ] Postgres repository, Redis aggregation, outbox/retry, voucher system, full ingestion pipeline tested.
+- [ ] Postgres repository, Redis aggregation, outbox/retry, family voucher/participant system (R26–R32), durable pending/attribution ledger, custody-transfer path (stub), full ingestion pipeline tested.
 
 ---
 
