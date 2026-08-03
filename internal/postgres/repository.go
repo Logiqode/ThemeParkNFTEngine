@@ -2,7 +2,11 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/Logiqode/ThemeParkNFT/internal/models"
@@ -67,4 +71,158 @@ func (r *Repository) ClaimVoucher(ctx context.Context, voucherID string, ownerID
 func (r *Repository) RecordMint(ctx context.Context, userID int64, rideID, date, txDigest string, gasUsed int64) error {
 	_, err := r.db.ExecContext(ctx, `INSERT INTO mint_logs (user_id, ride_id, mint_date, tx_digest, status, gas_used) VALUES ($1,$2,$3,$4,'CONFIRMED',$5) ON CONFLICT (user_id, ride_id, mint_date) DO UPDATE SET tx_digest=$4, status='CONFIRMED', gas_used=$5, updated_at=now()`, userID, rideID, date, txDigest, gasUsed)
 	return err
+}
+
+// ---- Rev 3: participant & durable attribution ledger (R26-R35) ----
+
+// CreateParticipant inserts a participant. For account-linked participants pass
+// an accountEmail; for dependents pass a guardianID (and the pre-provisioned
+// custodial wallet address is set afterwards via SetParticipantWallet).
+func (r *Repository) CreateParticipant(ctx context.Context, name string, accountEmail *string, guardianID *int64) (*models.Participant, error) {
+	var p models.Participant
+	err := r.db.GetContext(ctx, &p,
+		`INSERT INTO participants (name, account_email, guardian_id)
+		 VALUES ($1, $2, $3) RETURNING *`, name, accountEmail, guardianID)
+	if err != nil {
+		return nil, fmt.Errorf("create participant: %w", err)
+	}
+	return &p, nil
+}
+
+// GetParticipant returns a participant by id, or (nil, nil) if not found.
+func (r *Repository) GetParticipant(ctx context.Context, id int64) (*models.Participant, error) {
+	var p models.Participant
+	err := r.db.GetContext(ctx, &p, `SELECT * FROM participants WHERE id=$1`, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get participant: %w", err)
+	}
+	return &p, nil
+}
+
+// GetParticipantByEmail finds the participant linked to an account email, or
+// (nil, nil) if none exists yet (R28 account mode).
+func (r *Repository) GetParticipantByEmail(ctx context.Context, email string) (*models.Participant, error) {
+	var p models.Participant
+	err := r.db.GetContext(ctx, &p, `SELECT * FROM participants WHERE account_email=$1`, email)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get participant by email: %w", err)
+	}
+	return &p, nil
+}
+
+// SetParticipantWallet updates a participant's wallet state + address (R30:
+// own wallet attached later, or dependent custodial wallet provisioned).
+func (r *Repository) SetParticipantWallet(ctx context.Context, id int64, state models.ParticipantWalletState, addr string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE participants SET wallet_state=$1, custodial_wallet_address=$2, updated_at=now() WHERE id=$3`, state, addr, id)
+	if err != nil {
+		return fmt.Errorf("set participant wallet: %w", err)
+	}
+	return nil
+}
+
+// DelegateVoucher allocates a voucher to a participant (R27/R28) by linking
+// participant_id. Fails if the voucher is not still UNCLAIMED (already
+// delegated/claimed).
+func (r *Repository) DelegateVoucher(ctx context.Context, voucherID string, participantID int64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE ticket_vouchers SET participant_id=$1, updated_at=now()
+		 WHERE voucher_id=$2 AND status='UNCLAIMED' AND participant_id IS NULL`, participantID, voucherID)
+	if err != nil {
+		return fmt.Errorf("delegate voucher: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("voucher %s: %w", voucherID, models.ErrAlreadyAllocated)
+	}
+	return nil
+}
+
+// UpsertPendingMint writes (or replaces) the durable attribution-ledger row for
+// a participant + mint date (R32). Idempotent on (participant_id, mint_date).
+// ride_ids and scanned_ats are persisted as JSONB (durable, RFC3339 timestamps).
+func (r *Repository) UpsertPendingMint(ctx context.Context, pm models.PendingMint) error {
+	if pm.RideIDs == nil {
+		pm.RideIDs = []string{}
+	}
+	if pm.ScannedAts == nil {
+		pm.ScannedAts = []time.Time{}
+	}
+	rides, err := json.Marshal(pm.RideIDs)
+	if err != nil {
+		return fmt.Errorf("marshal ride_ids: %w", err)
+	}
+	ats, err := json.Marshal(pm.ScannedAts)
+	if err != nil {
+		return fmt.Errorf("marshal scanned_ats: %w", err)
+	}
+	_, err = r.db.ExecContext(ctx,
+		`INSERT INTO pending_mints (participant_id, ride_ids, scanned_ats, mint_date, wallet_state)
+		 VALUES ($1, $2::jsonb, $3::jsonb, $4, $5)
+		 ON CONFLICT (participant_id, mint_date) DO UPDATE
+		   SET ride_ids=EXCLUDED.ride_ids, scanned_ats=EXCLUDED.scanned_ats,
+		       wallet_state=EXCLUDED.wallet_state`,
+		pm.ParticipantID, string(rides), string(ats), pm.MintDate, string(pm.WalletState))
+	if err != nil {
+		return fmt.Errorf("upsert pending mint: %w", err)
+	}
+	return nil
+}
+
+// GetPendingMint returns the durable attribution row for a participant on a
+// date, or (nil, nil) if none. Used to prove M4.10 (row outlives Redis/wristband).
+func (r *Repository) GetPendingMint(ctx context.Context, participantID int64, mintDate string) (*models.PendingMint, error) {
+	var (
+		id          int64
+		rideRaw     []byte
+		atsRaw      []byte
+		mdate       string
+		walletState string
+		createdAt   time.Time
+	)
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, ride_ids, scanned_ats, mint_date::text, wallet_state, created_at
+		 FROM pending_mints WHERE participant_id=$1 AND mint_date=$2`,
+		participantID, mintDate).
+		Scan(&id, &rideRaw, &atsRaw, &mdate, &walletState, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get pending mint: %w", err)
+	}
+	// ride_ids is JSONB → raw []byte; decode into []string.
+	var rides []string
+	if len(rideRaw) > 0 {
+		if err := json.Unmarshal(rideRaw, &rides); err != nil {
+			return nil, fmt.Errorf("unmarshal ride_ids: %w", err)
+		}
+	}
+	// scanned_ats is JSONB (RFC3339 timestamps) → decode into []time.Time.
+	var ats []time.Time
+	if len(atsRaw) > 0 {
+		if err := json.Unmarshal(atsRaw, &ats); err != nil {
+			return nil, fmt.Errorf("unmarshal scanned_ats: %w", err)
+		}
+	}
+	if rides == nil {
+		rides = []string{}
+	}
+	if ats == nil {
+		ats = []time.Time{}
+	}
+	return &models.PendingMint{
+		ID:            id,
+		ParticipantID: participantID,
+		RideIDs:       rides,
+		ScannedAts:    ats,
+		MintDate:      mdate,
+		WalletState:   models.ParticipantWalletState(walletState),
+		CreatedAt:     createdAt,
+	}, nil
 }

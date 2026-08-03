@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,8 +18,10 @@ import (
 
 	"github.com/Logiqode/ThemeParkNFT/internal/config"
 	"github.com/Logiqode/ThemeParkNFT/internal/health"
+	"github.com/Logiqode/ThemeParkNFT/internal/models"
 	"github.com/Logiqode/ThemeParkNFT/internal/postgres"
 	redisClient "github.com/Logiqode/ThemeParkNFT/internal/redis"
+	voucherService "github.com/Logiqode/ThemeParkNFT/internal/voucher"
 )
 
 func main() {
@@ -38,6 +41,7 @@ func main() {
 	redis := redisClient.NewClient(cfg.Redis)
 	defer func() { _ = redis.Close() }()
 	repo := postgres.NewRepository(db)
+	vsvc := voucherService.NewService(repo)
 
 	// Strict readiness checks (R2): Voucher is ready when Postgres and Redis
 	// are both reachable.
@@ -121,6 +125,81 @@ func main() {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "claimed", "user_id": email})
+	})
+
+	// POST /api/vouchers/delegate — allocate a voucher to a participant
+	// (Rev 3, R27/R28): account mode links an email (own non-custodial,
+	// eventually-linked R30), dependent mode creates a child participant under
+	// a guardian with a custodial-proxy wallet (R35).
+	mux.HandleFunc("/api/vouchers/delegate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req models.DelegateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		res, err := vsvc.Delegate(r.Context(), req)
+		if err != nil {
+			switch {
+			case errors.Is(err, voucherService.ErrInvalidDelegation),
+				errors.Is(err, voucherService.ErrParticipantNotFound):
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			case errors.Is(err, voucherService.ErrVoucherAllocated):
+				http.Error(w, err.Error(), http.StatusConflict)
+			default:
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	// POST /api/vouchers/pending — persist a durable pending_mints attribution
+	// row for a participant + date (Rev 3, R32). End-of-day job calls this for
+	// adults who have no wallet yet; the row outlives Redis/wristband lifetime.
+	mux.HandleFunc("/api/vouchers/pending", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req models.RecordPendingMintRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if err := vsvc.RecordPendingMint(r.Context(), req); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "recorded"})
+	})
+
+	// POST /api/mint/claim-custody — (Rev 3, R33) off-chain custody transfer:
+	// once a dependent links their own account + non-custodial wallet, flip the
+	// participant to OWN_NON_CUSTODIAL. Real Sui object transfer is Week 6.
+	mux.HandleFunc("/api/mint/claim-custody", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			ParticipantID int64  `json:"participant_id"`
+			OwnWallet     string `json:"own_wallet"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		p, err := vsvc.ClaimCustody(r.Context(), req.ParticipantID, req.OwnWallet)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(p)
 	})
 
 	srv := &http.Server{Addr: ":8084", Handler: mux}

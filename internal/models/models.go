@@ -1,6 +1,15 @@
 package models
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrAlreadyAllocated is returned when a voucher is already delegated/claimed.
+// Defined here (shared) so both the postgres repository (source of the
+// condition) and the voucher service (domain mapping) can reference it without
+// a cross-package dependency.
+var ErrAlreadyAllocated = errors.New("voucher already allocated")
 
 type ScanEvent struct {
 	UserID    string `json:"user_id"    validate:"required"`
@@ -79,11 +88,14 @@ type TicketVoucher struct {
 	VoucherID   string       `db:"voucher_id"`
 	PurchaserID int64        `db:"purchaser_id"`
 	OwnerID     *int64       `db:"owner_id"`
-	Status      TicketStatus `db:"status"`
-	ClaimToken  *string      `db:"claim_token"`
-	ExpiresAt   *time.Time   `db:"expires_at"`
-	CreatedAt   time.Time    `db:"created_at"`
-	UpdatedAt   time.Time    `db:"updated_at"`
+	// ParticipantID links this voucher to the participant it is delegated to
+	// (R27/R28). NULL until the buyer allocates it (account or dependent mode).
+	ParticipantID *int64      `db:"participant_id"`
+	Status        TicketStatus `db:"status"`
+	ClaimToken    *string      `db:"claim_token"`
+	ExpiresAt     *time.Time   `db:"expires_at"`
+	CreatedAt     time.Time    `db:"created_at"`
+	UpdatedAt     time.Time    `db:"updated_at"`
 }
 
 type Ride struct {
@@ -176,4 +188,101 @@ type GoogleAuthRequest struct {
 type AuthResponse struct {
 	UserID     string `json:"user_id"`
 	SuiAddress string `json:"sui_address"`
+}
+
+// ---- Rev 3: Family Voucher & Participant Model (R26-R35) ----
+
+// ParticipantWalletState is how a participant's attendance NFT resolves to a
+// wallet (R30/R31/R35).
+type ParticipantWalletState string
+
+const (
+	// ParticipantWalletNone — no wallet attached yet (adult not onboarded);
+	// mints resolve to a durable pending_mints row (R32).
+	ParticipantWalletNone ParticipantWalletState = "NONE"
+	// ParticipantWalletOwn — participant's own non-custodial zkLogin wallet.
+	ParticipantWalletOwn ParticipantWalletState = "OWN_NON_CUSTODIAL"
+	// ParticipantWalletCustodial — custodial-proxy wallet held for a dependent
+	// (age/<usable-account> edge cases, R28). Dedicated per guardian (R35).
+	ParticipantWalletCustodial ParticipantWalletState = "CUSTODIAL_PROXY"
+)
+
+// Participant is a person (R26), distinct from an account/wallet. The gate's
+// wristband bind targets a participant. Dependents have a GuardianID (self-ref
+// to the family head) and a custodial-proxy wallet (R35).
+type Participant struct {
+	ID                     int64                  `db:"id"`
+	Name                   string                 `db:"name"`
+	AccountEmail           *string                `db:"account_email"`
+	GuardianID             *int64                 `db:"guardian_id"`
+	WalletState            ParticipantWalletState `db:"wallet_state"`
+	CustodialWalletAddress *string                `db:"custodial_wallet_address"`
+	KeysEnc                *string                `db:"keys_enc"`
+	CreatedAt              time.Time              `db:"created_at"`
+	UpdatedAt              time.Time              `db:"updated_at"`
+}
+
+// PendingMint is a durable attribution-ledger row (R32), keyed to a participant
+// and mint date. Never tied to Redis TTL / wristband lifetime; rebuildable from
+// scan_events. Kept by default, deletable on request (GDPR/R34).
+type PendingMint struct {
+	ID            int64                  `db:"id"`
+	ParticipantID int64                  `db:"participant_id"`
+	RideIDs       []string               `db:"ride_ids"`   // jsonb
+	ScannedAts    []time.Time            `db:"scanned_ats"` // jsonb (RFC3339)
+	MintDate      string                 `db:"mint_date"`   // DATE (YYYY-MM-DD)
+	WalletState   ParticipantWalletState `db:"wallet_state"`
+	CreatedAt     time.Time              `db:"created_at"`
+}
+
+// DelegationMode selects how a voucher is allocated to a participant (R28).
+type DelegationMode string
+
+const (
+	// DelegationAccount links the voucher to an email with a Google zkLogin
+	// account → own non-custodial wallet (eventually-linked, R30).
+	DelegationAccount DelegationMode = "account"
+	// DelegationDependent allocates to a person with no account (child/infant/
+	// elderly) under a guardian → custodial-proxy wallet (R28/R35).
+	DelegationDependent DelegationMode = "dependent"
+)
+
+// DelegateRequest is POST /api/vouchers/delegate (R27/R28).
+type DelegateRequest struct {
+	VoucherID string         `json:"voucher_id" validate:"required"`
+	Mode      DelegationMode `json:"mode" validate:"required,oneof=account dependent"`
+	// Account mode: the email to link (own non-custodial, eventually-linked).
+	AccountEmail string `json:"account_email" validate:"omitempty,email"`
+	// Dependent mode: the dependent's name + the guardian participant id.
+	Name       string `json:"name"`
+	GuardianID int64  `json:"guardian_id"`
+}
+
+// DelegateResponse returns the participant the voucher was allocated to.
+type DelegateResponse struct {
+	ParticipantID int64                  `json:"participant_id"`
+	VoucherID     string                 `json:"voucher_id"`
+	Mode          DelegationMode         `json:"mode"`
+	WalletState   ParticipantWalletState `json:"wallet_state"`
+	WalletAddress string                 `json:"wallet_address,omitempty"`
+	Pending       bool                   `json:"pending"`
+}
+
+// MintResolution is the result of resolving a participant's wallet at mint time
+// (R30/R31).
+type MintResolution struct {
+	WalletState   ParticipantWalletState `json:"wallet_state"`
+	WalletAddress string                 `json:"wallet_address,omitempty"`
+	// Pending is true when the participant has no wallet yet → caller must
+	// persist a durable pending_mints row (R32) instead of minting.
+	Pending bool `json:"pending"`
+}
+
+// RecordPendingMintRequest is the payload for writing a durable pending_mints
+// row (R32) for a participant's ride set on a given date.
+type RecordPendingMintRequest struct {
+	ParticipantID int64       `json:"participant_id" validate:"required"`
+	MintDate      string      `json:"mint_date" validate:"required"`
+	RideIDs       []string    `json:"ride_ids"`
+	ScannedAts    []time.Time `json:"scanned_ats"`
 }
