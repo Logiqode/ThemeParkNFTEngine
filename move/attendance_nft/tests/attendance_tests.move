@@ -23,6 +23,7 @@ module attendance_nft::attendance_tests {
             );
             attendance::destroy_test_cap(cap);
         };
+        test_scenario::next_tx(&mut scenario, ADMIN);
         let nft = test_scenario::take_from_address<AttendanceNFT>(&scenario, recipient);
         assert!(attendance::get_recipient(&nft) == recipient, 0);
         assert!(attendance::get_ride_id(&nft) == b"ride-001", 1);
@@ -105,12 +106,15 @@ module attendance_nft::attendance_tests {
             );
             attendance::destroy_test_cap(cap);
         };
+        test_scenario::next_tx(&mut scenario, ADMIN);
         let nft1 = test_scenario::take_from_address<AttendanceNFT>(&scenario, recipient);
         let nft2 = test_scenario::take_from_address<AttendanceNFT>(&scenario, recipient);
         let nft3 = test_scenario::take_from_address<AttendanceNFT>(&scenario, recipient);
-        assert!(attendance::get_ride_id(&nft1) == b"ride-001", 10);
+        // take_from_address returns the most-recently-transferred object first (LIFO),
+        // so nft1 corresponds to the last-minted ride (ride-003).
+        assert!(attendance::get_ride_id(&nft1) == b"ride-003", 10);
         assert!(attendance::get_ride_id(&nft2) == b"ride-002", 11);
-        assert!(attendance::get_ride_id(&nft3) == b"ride-003", 12);
+        assert!(attendance::get_ride_id(&nft3) == b"ride-001", 12);
         test_scenario::return_to_address(recipient, nft3);
         test_scenario::return_to_address(recipient, nft2);
         test_scenario::return_to_address(recipient, nft1);
@@ -193,6 +197,7 @@ module attendance_nft::attendance_tests {
             );
             attendance::destroy_test_cap(cap);
         };
+        test_scenario::next_tx(&mut scenario, ADMIN);
         let nft = test_scenario::take_from_address<AttendanceNFT>(&scenario, recipient);
         {
             let ctx = test_scenario::ctx(&mut scenario);
@@ -219,6 +224,7 @@ module attendance_nft::attendance_tests {
             );
             attendance::destroy_test_cap(cap);
         };
+        test_scenario::next_tx(&mut scenario, ADMIN);
         let mut nft = test_scenario::take_from_address<AttendanceNFT>(&scenario, recipient);
         {
             let ctx = test_scenario::ctx(&mut scenario);
@@ -247,6 +253,7 @@ module attendance_nft::attendance_tests {
             );
             attendance::destroy_test_cap(cap);
         };
+        test_scenario::next_tx(&mut scenario, ADMIN);
         let nft = test_scenario::take_from_address<AttendanceNFT>(&scenario, recipient);
         assert!(attendance::get_recipient(&nft) == recipient, 30);
         assert!(attendance::get_ride_id(&nft) == b"ride-005", 31);

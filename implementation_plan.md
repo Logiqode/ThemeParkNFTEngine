@@ -407,20 +407,20 @@ theme-park-nft-engine/
 
 ## Week 5 — Sui Move Smart Contract (Attendance NFT)
 
-**Goal:** Deploy Move module that mints attendance NFTs. **Status: DONE (deployed to testnet, 11 tests passing).**
+**Goal:** Deploy Move module that mints attendance NFTs. **Status: DONE (deployed to testnet, 11/11 tests passing after 2026-08-03 reconciliation).** Contract audited against Rev 3 (R26–R35) — **design-sound, no changes required** (see below).
 
 ### Done (verified 2026-08-01)
 - [x] `move/attendance_nft/` package; `sui move build` clean.
 - [x] Module `attendance_nft::attendance`: `MintCap`, `mint_attendance_nft`, `mint_batch`, `burn`, `update_metadata`, view fns, zero-address checks, events, transferable NFT (Q7).
 - [x] **Deployed:** Package `0x78c9dbba118923c4976599877450cd281f880f94d217d806714782a658b01d1e`, MintCap `0xfe4dcb...f30cb` (testnet). See README.
-- [x] 11 Move unit tests.
-- [ ] *(R11)* Add a code-comment audit note in `attendance.move` confirming no PII fields (recipient = address only, name = ride name only).
+- [x] 11 Move unit tests **— reconciled 2026-08-03: 5 were failing due to test_scenario drift** (missing `next_tx()` boundary before `take_from_address` + LIFO take order in the batch test). Fixed; now 11/11 pass. Contract module itself unchanged/fit-for-purpose.
+- [x] *(R11)* **NO-PII audit note added** in `attendance.move` header — confirms on-chain stores only address/ride_id/date/name/metadata_url, no PII (R34, right-to-be-forgotten).
 
 ### CI/CD Milestones
-- [ ] **CI gate:** `ci-move.yml` runs `sui move test` on PRs touching `move/` (add — missing).
+- [x] **CI gate:** `ci-move.yml` added 2026-08-03 — installs Sui CLI v1.76.0 (matches deployed toolchain) + runs `sui move build` + `sui move test` on PRs/pushes touching `move/`.
 
 ### Deliverables
-- [x] Audited Move module, testnet deployment, package ID documented. *(Remaining: ci-move.yml)*
+- [x] Audited Move module, testnet deployment, package ID documented, **`ci-move.yml` added 2026-08-03** (Sui CLI v1.76.0 + `sui move build` + `sui move test` on `move/` changes).
 
 ---
 

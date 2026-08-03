@@ -1,0 +1,40 @@
+name: CI — Sui Move Contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "move/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "move/**"
+
+# Week 5 CI gate: verify the attendance_nft Move module builds and all unit
+# tests pass. Pins the Sui toolchain to v1.76.0 to match the version used to
+# deploy the package on testnet (see move/attendance_nft/Published.toml).
+jobs:
+  move-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Sui CLI (v1.76.0)
+        # Prebuilt binary matching the deployed toolchain-version 1.76.0.
+        run: |
+          curl -sL "https://github.com/MystenLabs/sui/releases/download/testnet-v1.76.0/sui-testnet-v1.76.0-ubuntu-x86_64.tgz" -o /tmp/sui.tgz
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/sui.tgz -C "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Sui CLI
+        run: sui --version
+
+      - name: Move build
+        working-directory: move/attendance_nft
+        run: sui move build
+
+      - name: Move test
+        working-directory: move/attendance_nft
+        run: sui move test

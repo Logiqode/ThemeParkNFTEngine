@@ -1,6 +1,18 @@
 /// Module: attendance_nft::attendance
 /// Mints transferable Attendance NFTs with IPFS metadata for verified ride scans.
 /// Supports batch minting, admin-only metadata updates, and burning.
+///
+/// NO-PII AUDIT (R11/R34): this module stores NO personally-identifiable
+/// information on-chain. Fields are limited to: recipient (pseudonymous Sui
+/// address — never a name/email), ride_id, date, ride name, and an IPFS
+/// metadata_url. The person<->token link and all PII live ONLY in off-chain
+/// Postgres (deletable, right-to-be-forgotten), per decision R34.
+///
+/// Rev 3 compatibility (R26-R35): recipient is a plain address, so the Go
+/// minter can mint a dependent's NFT directly into a guardian custodial wallet
+/// (R31) by passing that wallet's address. The NFT has `key, store` -> it is
+/// publicly transferable, which is exactly the mechanism M6.7 / R33 uses to
+/// later transfer custody to a dependent's own non-custodial wallet.
 module attendance_nft::attendance {
     use sui::tx_context::{Self, TxContext};
     use sui::object::{Self, UID};
