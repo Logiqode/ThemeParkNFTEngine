@@ -100,6 +100,9 @@ jobs:
         run: |
           go test -tags=integration ./internal/pipeline -coverprofile=coverage-integration.txt -count=1
           go test -tags=integration ./internal/kafka -run TestIntegrationDelivery -count=1
+          go test -tags=integration ./internal/voucher -count=1
+          go test -tags=integration ./internal/minter -count=1
+          go test -tags=integration ./internal/gate -count=1
         env:
           INTEGRATION: "1"
           POSTGRES_HOST: localhost

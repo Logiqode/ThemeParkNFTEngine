@@ -52,6 +52,7 @@ test-integration:
 	go test -tags=integration ./internal/gate -v -count=1
 	go test -tags=integration ./internal/kafka -v -count=1
 	go test -tags=integration ./internal/voucher -v -count=1
+	go test -tags=integration ./internal/minter -v -count=1
 
 # Week 2 benchmarks (R15): Kafka delivery reliability under congestion.
 # Requires: healthy compose stack (`make healthy`), go, jq, bc.
@@ -69,6 +70,16 @@ bench-verify:
 # Run linter (requires golangci-lint)
 lint:
 	golangci-lint run ./...
+
+# Coverage gate (R4 / W4 CI): aggregate line coverage of ./internal/ must be ≥
+# the threshold. Runs the integration-tagged suite (needs live stack, INTEGRATION=1).
+# Usage: make coverage [THRESHOLD=70]
+COVERAGE_THRESHOLD ?= 70
+coverage:
+	INTEGRATION=1 go test -tags=integration -coverprofile=coverage.out ./internal/...
+	@total=$$(go tool cover -func=coverage.out | awk '/total:/{gsub(/[^0-9.]/,"",$$3); print int($$3)}'); \
+	echo "internal/ coverage: $$total% (threshold: $(COVERAGE_THRESHOLD)%)"; \
+	if [ "$$total" -lt "$(COVERAGE_THRESHOLD)" ]; then echo "COVERAGE GATE FAILED: $$total% < $(COVERAGE_THRESHOLD)%"; exit 1; else echo "COVERAGE GATE PASSED"; fi
 
 # Tidy dependencies
 tidy:

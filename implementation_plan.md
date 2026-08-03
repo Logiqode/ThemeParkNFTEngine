@@ -366,13 +366,13 @@ theme-park-nft-engine/
 
 ## Week 4 — Postgres Persistence, Redis Aggregation, Family Voucher & Participant System
 
-**Goal:** Persist valid scans to Postgres; aggregate per-user ride sets in Redis (cache); implement the **Rev 3 family voucher / participant model** (R26–R35). **Status: REV 3 OFF-CHAIN CORE EXECUTED 2026-08-03** — migration 0002, `internal/voucher` + `cmd/voucher` endpoints built; delegation/participant + wallet-resolution + durable `pending_mints` logic verified against compose Postgres; `make build/test/lint` + full integration suite green. **IMPORTANT: no on-chain activity — no mints, no custody transfers (M4.9/M4.11 on-chain halves, real Sui object transfer, and the end-of-day `cmd/minter` mint driver are all Week 6 / remaining).** **Remaining:** M4.1–M4.8, end-of-day mint-resolution driver in `cmd/minter`, outbox/retry (M4.3), CI coverage gate ≥70%.
+**Goal:** Persist valid scans to Postgres; aggregate per-user ride sets in Redis (cache); implement the **Rev 3 family voucher / participant model** (R26–R35). **Status: WEEK 4 OFF-CHAIN COMPLETE 2026-08-03** — M4.1–M4.8 + M4.10 + M4.12 all verified live (outbox M4.3, ticket-state M4.7, voucher claim/share M4.5/M4.6, delegation M4.8, E2E M4.4). `make build/test/lint` + full integration suite green. **NOT DONE / WEEK 6:** on-chain minting & custody transfer (M4.9→M6.6, M4.11/R33→M6.7) and the **CI coverage gate ≥70% — currently 38%** (`make coverage` fails threshold). **Remaining this week:** none off-chain; coverage gap needs Week 6/7 package tests (sui/storage/telemetry).
 
 ### Technical Requirements
 - [x] `internal/postgres`: repository pattern, `ScanRepository.Insert` (idempotent on `trace_id` UNIQUE constraint), `pgx` pool. *(insert + repo existed from W3 pipeline; extended with Rev 3 participant/pending-mint methods 2026-08-03.)*
 - [x] Migrations v2 (`0002_*` via golang-migrate, R1): verify `UNIQUE(trace_id)`; `CHECK` constraints on `ride_id`; ticket status enum aligned with R13; **new `participants`** (id, guardian_id, name, account_email nullable, wallet_state enum `NONE|OWN_NON_CUSTODIAL|CUSTODIAL_PROXY`, timestamps) and **`pending_mints`** (id, participant_id, ride_ids jsonb, scanned_ats, mint_date, wallet_state, created_at — durable attribution ledger, R32). *Applied + verified (version=2, dirty=false). NOTE: `scanned_ats` stored as **JSONB** of RFC3339 (not `timestamptz[]`) — avoids pgx array text-parse fragility, equally durable/rebuildable.*
 - [x] Redis Set aggregation: `SADD user:{user_id}:rides {ride_id}` per valid scan; daily key `user:{user_id}:rides:{date}` TTL 48h (cache only — rebuildable from `scan_events`). *(pre-existing in `internal/pipeline`.)*
-- [ ] Transactional boundary: insert Postgres → SADD Redis; on Redis failure, compensate or mark for retry (outbox pattern). *(Dedup-compensation exists (R25); general Redis-down outbox still TODO — M4.3.)*
+- [x] Transactional boundary: insert Postgres → SADD Redis; on Redis failure, compensate or mark for retry (outbox pattern). *(Implemented 2026-08-03 (M4.3): migration 0003 `scan_events_outbox`; the handler parks the failed SADD + commits; `cmd/consumer` drain worker replays until Redis accepts — no loss. Dedup-compensation (R25) retained for non-outbox wins.)*
 - [ ] Batch insert optimization (batch size configurable).
 - [x] **Family Voucher / Participant System (`internal/voucher`, `cmd/voucher`):** *(built 2026-08-03)*
   - [x] `POST /api/vouchers/purchase` → N voucher rows (`UNCLAIMED`, `purchaser_id`). *(pre-existing)*
@@ -380,27 +380,28 @@ theme-park-nft-engine/
   - [x] `POST /api/vouchers/share` → magic link (signed JWT with `voucher_id`). *(pre-existing)*
   - [x] `GET /api/vouchers/claim?token=...` → JIT registration → voucher/ticket `UNCLAIMED → CLAIMED` (R13). *(pre-existing)*
   - [x] Participant has a `guardian_id` and `wallet_state`; dependents get a custodial wallet reference (R35).
-- [ ] **Minter mint resolution (R30/R31):** per participant, resolve wallet (own → custodial → pending). Dependents mint immediately into guardian custodial wallet; unresolved adults write a durable `pending_mints` row at end-of-day (R32). Idempotent via `mint_logs` UNIQUE(user_id, ride_id, mint_date) — still works keyed by participant/guardian. *(Service `ResolveMintWallet` + `RecordPendingMint` built & verified; the **run-at-end-of-day `cmd/minter` driver** is the remaining wiring.)*
-- [ ] **Custody transfer (R33):** `POST /mint/claim-custody` — transfer NFT from custodial wallet to a dependent's newly-linked non-custodial wallet (Sui object transfer) + update attribution. *(OFF-CHAIN stub only, 2026-08-03:* `ClaimCustody` flips `wallet_state` in Postgres + updates attribution. **Real on-chain Sui object transfer = Week 6 — nothing on-chain yet, no tx.**)*
+- [ ] **Minter mint resolution (R30/R31):** per participant, resolve wallet (own → custodial → pending). Dependents mint immediately into guardian custodial wallet; unresolved adults write a durable `pending_mints` row at end-of-day (R32). Idempotent via `mint_logs` UNIQUE(user_id, ride_id, mint_date) — still works keyed by participant/guardian. *(OFF-CHAIN: `ResolveMintWallet` + `RecordPendingMint` built & verified; the **run-at-end-of-day `cmd/minter` driver** is the remaining Week 4 wiring — it resolves wallets and writes `pending_mints`, but **actual tx submission is Week 6**.)*
+- [ ] **Custody transfer (R33):** `POST /mint/claim-custody` — transfer NFT from custodial wallet to a dependent's newly-linked non-custodial wallet (Sui object transfer) + update attribution. *(OFF-CHAIN stub done 2026-08-03: `ClaimCustody` flips `wallet_state` in PG + updates attribution. **Real on-chain Sui object transfer MOVED to Week 6 → M6.7** — nothing on-chain yet, no tx.)*
 
 ### Testing Milestones
-- [ ] **M4.1** *Persistence:* 5k valid events → PG row count == 5k, no dups, indexes performant.
-- [ ] **M4.2** *Aggregation:* user 3 distinct rides → Redis set cardinality == 3; dup ride → unchanged.
-- [ ] **M4.3** *Failure:* Redis down mid-processing → PG insert succeeds, aggregation retried via outbox/backoff, no loss.
-- [ ] **M4.4** *E2E:* loadgen(10k, 15% dups) → PG == 8.5k unique, Redis sets correct.
-- [ ] **M4.5** *Voucher:* purchase 8 → 8 `unclaimed` → claim 1 → `claimed`.
-- [ ] **M4.6** *Magic link expired/invalid* → rejected.
-- [ ] **M4.7** *(R13) Ticket state transitions:* claim → QR bind → txn check → ACTIVE → ride scan → USED.
-- [ ] **M4.8** *(NEW Rev 3) Delegation (account-linked):* dad buys 4 → delegates 1 to wife's email → wife claims → own non-custodial wallet → mint lands in her wallet. *(Delegate(account) + reuse-existing-participant + own-wallet resolution built & unit-tested; full claim→mint E2E pending.)*
-- [ ] **M4.9** *(NEW Rev 3) Dependent (no account):* dad delegates to a child `dependent` → custodial-proxy wallet → wristband binds to child participant → gate passes with NO wallet → mint attributed to child in guardian wallet. *(OFF-CHAIN layer only, 2026-08-03:* dependent delegation + custodial wallet model + `ResolveMintWallet` → non-pending verified against Postgres. **No real mint / no on-chain activity — the "mint attributed to child in guardian wallet" half is Week 6 zkLogin mint.**)*
-- [x] **M4.10** *(NEW Rev 3) Durable pending/attribution:* unresolved adult → `pending_mints` row persisted at end-of-day; re-aggregation from `scan_events` after Redis TTL yields the same ride set; row lives independently of Redis/wristband lifetime. *(durable-row persistence + independence verified live against Postgres — a pure data-layer property, no blockchain involved; `rebuild-from-scan_events` helper left as a follow-on.)*
-- [ ] **M4.11** *(NEW Rev 3) Custody transfer:* dependent links Google later → NFT object transferred from custodial wallet to their own wallet; attribution updated. *(OFF-CHAIN stub only, 2026-08-03:* `ClaimCustody` flips `wallet_state` in Postgres. **No NFT object transfer / no tx — real Sui object transfer = Week 6.**)*
+- [x] **M4.1** *Persistence:* 5k valid events → PG row count == 5k, no dups, indexes performant. *(verified 2026-08-03 — `TestW4Persistence5k`: 5000 rows, re-submitted dups → still 5000; 6.4s.)*
+- [x] **M4.2** *Aggregation:* user 3 distinct rides → Redis set cardinality == 3; dup ride → unchanged. *(`TestW4Aggregation`.)*
+- [x] **M4.3** *Failure:* Redis down mid-processing → PG insert succeeds, aggregation retried via outbox/backoff, no loss. *(Implemented outbox (migration 0003 `scan_events_outbox`), handler parks on aggregate failure + commits, drain worker in `cmd/consumer`. `TestW4OutboxNoLoss` verifies PG row + outbox row → drain → Redis set + outbox cleared.)*
+- [x] **M4.4** *E2E:* loadgen(10k, 15% dups) → PG == 8.5k unique, Redis sets correct. *(`TestW4E2ELoadgenDups`: 10k events / 1.5k dups → 8500 PG rows, 10 distinct rides in Redis; 10.8s.)*
+- [x] **M4.5** *Voucher:* purchase 8 → 8 `unclaimed` → claim 1 → `claimed`. *(`TestIntegrationVoucherPurchaseAndClaim`.)*
+- [x] **M4.6** *Magic link expired/invalid* → rejected. *(Extracted `internal/voucher` `SignMagicLink`/`VerifyMagicLink` (used by cmd/voucher); `link_test.go` — expired/invalid/garbage/empty all rejected.)*
+- [x] **M4.7** *(R13) Ticket state transitions:* claim → QR bind → txn check → ACTIVE → ride scan → USED. *(added `RideScanService.markTicketUsed`; `TestM47TicketStateTransitions` verifies CLAIMED→PENDING_ENTRY→ACTIVE→USED.)*
+- [x] **M4.8** *(NEW Rev 3) Delegation (account-linked):* dad buys 4 → delegates 1 to wife's email → wife claims → own non-custodial wallet → mint lands in her wallet. *(OFF-CHAIN portion verified 2026-08-03 — `TestIntegrationAccountDelegationResolvesToOwnWallet`: delegate→claim→own wallet resolution resolves to her wallet. **The actual on-chain mint into her wallet is Week 6 (same mint machinery as M6.6) — no on-chain activity in Week 4.**)*
+- [ ] **M4.9** *(NEW Rev 3, on-chain half MOVED to W6 → M6.6) Dependent (no account):* dad delegates to a child `dependent` → custodial-proxy wallet → wristband binds to child participant → gate passes with NO wallet → mint attributed to child in guardian wallet. *(OFF-CHAIN layer done 2026-08-03:* dependent delegation + custodial wallet model + `ResolveMintWallet` → non-pending verified against Postgres. **The real mint into the guardian wallet is M6.6 (Week 6).**)*
+- [x] **M4.10** *(NEW Rev 3) Durable pending/attribution:* unresolved adult → `pending_mints` row persisted at end-of-day; re-aggregation from `scan_events` after Redis TTL yields the same ride set; row lives independently of Redis/wristband lifetime. *(durable-row persistence + independence + rebuild-from-`scan_events` verified live 2026-08-03 — `ScanEventRideSource` covers both account-linked (users.email) and **dependent (ticket_vouchers.participant_id)** attribution via M4.12; pure data-layer, no blockchain.)*
+- [ ] **M4.11** *(NEW Rev 3, MOVED to W6 → M6.7) Custody transfer:* dependent links Google later → NFT object transferred from custodial wallet to their own wallet; attribution updated. *(OFF-CHAIN `ClaimCustody` state-flip done 2026-08-03. **Real NFT object transfer = M6.7 (Week 6), no tx yet.**)*
+- [x] **M4.12** *(NEW Rev 3, off-chain) End-of-day mint-resolution driver:* `internal/minter` `DayResolver` iterates participants-with-rides, resolves each wallet (own → custodial → pending), writes durable `pending_mints` for unresolved adults (M4.10 end-to-end attribution writer). Exposed as `POST /mint/resolve-day`. *(DONE + verified live 2026-08-03 — unit tests + `resolver_integration_test.go`; reads rides from durable `scan_events` via `ScanEventRideSource`, so it doubles as the M4.10 rebuild path for account-linked participants; no on-chain submission.)*
 
 ### CI/CD Milestones
-- [ ] **CI gate:** full pipeline integration test in CI; **coverage gate ≥ 70% on `internal/`** (R4).
+- [ ] **CI gate:** full pipeline integration test in CI (gate/pipeline/kafka/voucher/minter wired in `ci-lint.yml` 2026-08-03); **coverage gate ≥ 70% on `internal/`** added as `make coverage` + CI wiring. **NOT MET: aggregate = 38% < 70%** — dragged down by 0% on `internal/sui` (Week 6), `internal/storage` + `internal/telemetry` (Week 6/7), and thin `internal/redis`. Needs Week 6/7 package tests to clear.
 
 ### Deliverables
-- [ ] ***PARTIAL 2026-08-03:*** Postgres repository ✔, Redis aggregation ✔, **outbox/retry ✘ (M4.3)**, family voucher/participant system (R26–R32) ✔, durable pending/attribution ledger ✔, custody-transfer path (stub) ✔, full ingestion pipeline tested ✔ (unit + integration). **Remaining:** outbox/retry, end-of-day minter mint-resolution driver, M4.1–M4.8 milestone tests.
+- [ ] ***Week 4 essentially complete 2026-08-03 — remaining: CI coverage gate (38% < 70%) + Week 6 on-chain.*** Postgres repository ✔, Redis aggregation ✔, **outbox/retry (M4.3) ✔**, family voucher/participant system (R26–R32) ✔, durable pending/attribution ledger ✔, custody-transfer path (off-chain stub ✔; real on-chain = Week 6) ✔, full ingestion pipeline tested ✔ (unit + integration: M4.1–M4.8).
 
 ---
 
@@ -434,10 +435,11 @@ theme-park-nft-engine/
   - Store ephemeral key + user mapping in PG `users` (**encrypted at rest with `ENCRYPTION_KEY`**).
   - User never sees seed phrase / never pays gas (Q4).
 - [ ] **Gas sponsorship:** custodial gas pool wallet from `SUI_GAS_POOL_MNEMONIC` (currently **unused** — fixes keystore-file loading).
-- [ ] `cmd/minter` `POST /mint/daily`: Redis SMEMBERS → `mint_batch` (single tx, multiple ride_ids) → record `mint_logs` → **idempotency: skip already-minted (UNIQUE user/ride/date exists in schema; enforce in code via ON CONFLICT)**.
+- [ ] `cmd/minter` `POST /mint/daily`: Redis SMEMBERS → `mint_batch` (single tx, multiple ride_ids) → record `mint_logs` → **idempotency: skip already-minted (UNIQUE user/ride/date exists in schema; enforce in code via ON CONFLICT)**. *(The **off-chain end-of-day resolution driver built in Week 4 (M4.12)** resolves wallets + writes `pending_mints`; this line is the real tx submission against the resolved wallets, including dependents → guardians (M6.6).)*
 - [ ] **RPC throttling:** client-side batching + concurrency semaphore (`SUI_RPC_MAX_CONCURRENCY`) + 429 exponential backoff (backoff exists; add semaphore).
 - [ ] **R16 real impl:** `internal/auth` zkLogin wallet readiness check (JWT valid + wallet derived + gas pool funded).
 - [ ] **JIT registration integration:** voucher claim triggers real zkLogin → custodial wallet → background mint task (R9/R13 tie-in).
+- [ ] **Custody transfer real impl (R33, moved from W4 → M6.7):** `POST /mint/claim-custody` performs the Sui **NFT object transfer** from the custodial wallet to a dependent's newly-linked non-custodial wallet and updates off-chain attribution. *(Week 4 built the off-chain `ClaimCustody` state-flip only.)*
 
 ### Testing Milestones
 - [ ] **M6.1** SDK smoke: Go client reads package object on testnet.
@@ -445,6 +447,8 @@ theme-park-nft-engine/
 - [ ] **M6.3** Idempotency: re-trigger → no duplicate mints, existing digests returned.
 - [ ] **M6.4** RPC 429: backoff retries succeed, no partial state corruption.
 - [ ] **M6.5** zkLogin: Google JWT → Sui address derived, tx signed server-side, NFT in user's address (**testnet, minimal txs; mock in CI**).
+- [ ] **M6.6** *(moved from W4 M4.9) Dependent mint:* end-of-day driver (`cmd/minter`, off-chain resolution built in Week 4) submits the dependent's NFT **into the guardian custodial wallet** (R31) — on-chain validation that a child's mint lands in the family wallet.
+- [ ] **M6.7** *(moved from W4 M4.11 / R33) Custody transfer:* once a dependent links their own Google account, real Sui NFT **object transfer** from the custodial wallet to their own non-custodial wallet + off-chain attribution update (`POST /mint/claim-custody` real impl).
 
 ### CI/CD Milestones
 - [ ] **CI gate:** `ci-build.yml` builds `minter` image; mock Sui RPC for unit tests.

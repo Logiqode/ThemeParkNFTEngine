@@ -59,7 +59,7 @@ func main() {
 	// NFC transaction check (R16): mock now (no testnet spam); real zkLogin in W6.
 	perf := &auth.MockTxnCheck{FailWhen: cfg.Gate.TxnCheckFailWhen}
 	bindingSvc := gate.NewBindingService(db, redis, cfg.Gate, perf)
-	rideScanSvc := gate.NewRideScanService(redis, producer)
+	rideScanSvc := gate.NewRideScanService(redis, producer, db)
 
 	// Strict readiness checks (R2): Gate is ready when Postgres, Redis, and
 	// Kafka bootstrap brokers are all reachable.

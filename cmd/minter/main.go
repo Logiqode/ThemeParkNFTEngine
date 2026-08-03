@@ -17,10 +17,12 @@ import (
 
 	"github.com/Logiqode/ThemeParkNFT/internal/config"
 	"github.com/Logiqode/ThemeParkNFT/internal/health"
+	minterService "github.com/Logiqode/ThemeParkNFT/internal/minter"
 	"github.com/Logiqode/ThemeParkNFT/internal/postgres"
 	redisClient "github.com/Logiqode/ThemeParkNFT/internal/redis"
 	"github.com/Logiqode/ThemeParkNFT/internal/storage"
 	suiClient "github.com/Logiqode/ThemeParkNFT/internal/sui"
+	voucherService "github.com/Logiqode/ThemeParkNFT/internal/voucher"
 )
 
 func main() {
@@ -144,6 +146,42 @@ func main() {
 			"ride_ids":      rideIDs,
 			"metadata_urls": metadataURLs,
 			"status":        "confirmed",
+		})
+	})
+
+	// POST /mint/resolve-day — OFF-CHAIN end-of-day mint-resolution pass
+	// (Week 4, M4.12, R30/R31/R32). Iterates participants-with-rides for a date,
+	// resolves each wallet, and writes a durable pending_mints row for adults
+	// with no wallet. NO on-chain activity — actual tx submission is Week 6.
+	mux.HandleFunc("/mint/resolve-day", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Date string `json:"date" validate:"required"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if req.Date == "" {
+			http.Error(w, "date required (YYYY-MM-DD)", http.StatusBadRequest)
+			return
+		}
+		resolver := minterService.NewDayResolver(
+			repo,
+			minterService.NewScanEventRideSource(db),
+			voucherService.NewService(repo),
+		)
+		resolutions, err := resolver.ResolveDay(r.Context(), req.Date)
+		if err != nil {
+			http.Error(w, "resolve-day failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"date":        req.Date,
+			"resolutions": resolutions,
 		})
 	})
 

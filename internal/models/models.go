@@ -286,3 +286,19 @@ type RecordPendingMintRequest struct {
 	RideIDs       []string    `json:"ride_ids"`
 	ScannedAts    []time.Time `json:"scanned_ats"`
 }
+
+// OutboxRow is a parked Redis-aggregation intent (M4.3): a scan_events row has
+// been durably committed, but the Redis SADD could not be applied (Redis down).
+// A drain worker replays these until Redis accepts them, so no ride count is
+// lost even when Redis is unavailable mid-pipeline.
+type OutboxRow struct {
+	ID        int64     `db:"id"`
+	TraceID   string    `db:"trace_id"`
+	UserEmail string    `db:"user_email"`
+	RideID    string    `db:"ride_id"`
+	ScannedAt time.Time `db:"scanned_at"`
+	Status    string    `db:"status"`
+	Attempts  int       `db:"attempts"`
+	CreatedAt time.Time `db:"created_at"`
+	UpdatedAt time.Time `db:"updated_at"`
+}

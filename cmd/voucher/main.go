@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/rs/zerolog"
@@ -85,31 +84,31 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"voucher_ids": ids})
 	})
 
-	// POST /api/vouchers/share — generate magic link (JWT)
+	// POST /api/vouchers/share — generate magic link (JWT, M4.6)
 	mux.HandleFunc("/api/vouchers/share", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ VoucherID string `json:"voucher_id"` }
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"voucher_id": req.VoucherID,
-			"exp":        time.Now().Add(24 * time.Hour).Unix(),
-		})
-		tokenStr, _ := token.SignedString([]byte(cfg.Gate.HMACSecret))
+		tokenStr, err := voucherService.SignMagicLink(cfg.Gate.HMACSecret, req.VoucherID, 24*time.Hour)
+		if err != nil {
+			http.Error(w, "link signing failed", http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"magic_link": "https://themepark.app/claim?token=" + tokenStr})
 	})
 
-	// GET /api/vouchers/claim?token=... — JIT claim
+	// GET /api/vouchers/claim?token=...&email=... — JIT claim (M4.5/M4.6)
 	mux.HandleFunc("/api/vouchers/claim", func(w http.ResponseWriter, r *http.Request) {
 		tokenStr := r.URL.Query().Get("token")
-		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) { return []byte(cfg.Gate.HMACSecret), nil })
-		if err != nil || !token.Valid {
+		voucherID, err := voucherService.VerifyMagicLink(cfg.Gate.HMACSecret, tokenStr)
+		if err != nil {
+			// Invalid and expired links are both rejected (M4.6), without
+			// leaking which — same 401 either way.
 			http.Error(w, "invalid or expired magic link", http.StatusUnauthorized)
 			return
 		}
-		claims, _ := token.Claims.(jwt.MapClaims)
-		voucherID, _ := claims["voucher_id"].(string)
 		email := r.URL.Query().Get("email")
 		if email == "" {
 			http.Error(w, "email required", http.StatusBadRequest)

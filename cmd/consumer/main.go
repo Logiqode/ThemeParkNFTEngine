@@ -18,6 +18,7 @@ import (
 	internalKafka "github.com/Logiqode/ThemeParkNFT/internal/kafka"
 	"github.com/Logiqode/ThemeParkNFT/internal/models"
 	"github.com/Logiqode/ThemeParkNFT/internal/pipeline"
+	"github.com/Logiqode/ThemeParkNFT/internal/postgres"
 	redisClient "github.com/Logiqode/ThemeParkNFT/internal/redis"
 )
 
@@ -67,7 +68,26 @@ func main() {
 	defer func() { _ = healthSrv.Close() }()
 
 	// Shared production handler: dedup → persist → aggregate (internal/pipeline).
-	scanHandler := pipeline.NewScanHandler(db, redis)
+	// It is outbox-armed (M4.3): a Redis aggregation failure parks the intent in
+	// scan_events_outbox instead of losing the count.
+	repo := postgres.NewRepository(db)
+	scanHandler := pipeline.NewScanHandler(db, redis).WithOutbox(repo)
+
+	// M4.3 outbox drain worker: replay parked Redis aggregations until they land.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := scanHandler.DrainOutbox(ctx, repo, 100); err != nil {
+					log.Warn().Err(err).Msg("outbox drain pass failed (will retry)")
+				}
+			}
+		}
+	}()
 
 	consumer := internalKafka.NewConsumer(cfg.Kafka, cfg.Kafka.ConsumerGroup, scanHandler.Handle, 10)
 	if err := consumer.Run(ctx); err != nil {

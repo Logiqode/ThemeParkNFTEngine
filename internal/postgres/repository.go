@@ -116,6 +116,16 @@ func (r *Repository) GetParticipantByEmail(ctx context.Context, email string) (*
 	return &p, nil
 }
 
+// ListParticipants returns every participant (used by the off-chain end-of-day
+// mint-resolution driver, M4.12).
+func (r *Repository) ListParticipants(ctx context.Context) ([]models.Participant, error) {
+	var ps []models.Participant
+	if err := r.db.SelectContext(ctx, &ps, `SELECT * FROM participants ORDER BY id`); err != nil {
+		return nil, fmt.Errorf("list participants: %w", err)
+	}
+	return ps, nil
+}
+
 // SetParticipantWallet updates a participant's wallet state + address (R30:
 // own wallet attached later, or dependent custodial wallet provisioned).
 func (r *Repository) SetParticipantWallet(ctx context.Context, id int64, state models.ParticipantWalletState, addr string) error {
@@ -225,4 +235,48 @@ func (r *Repository) GetPendingMint(ctx context.Context, participantID int64, mi
 		WalletState:   models.ParticipantWalletState(walletState),
 		CreatedAt:     createdAt,
 	}, nil
+}
+
+// ---- Outbox (M4.3): parked Redis-aggregation intents ----
+
+// InsertOutbox parks a failed Redis SADD so it can be replayed later (idempotent
+// on trace_id — a re-processed event never double-parks). Used when PG insert
+// succeeded but Redis aggregation failed, guaranteeing no loss.
+func (r *Repository) InsertOutbox(ctx context.Context, traceID, userEmail, rideID string, scannedAt time.Time) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO scan_events_outbox (trace_id, user_email, ride_id, scanned_at)
+		 VALUES ($1,$2,$3,$4) ON CONFLICT (trace_id) DO NOTHING`,
+		traceID, userEmail, rideID, scannedAt)
+	if err != nil {
+		return fmt.Errorf("insert outbox: %w", err)
+	}
+	return nil
+}
+
+// ListPendingOutbox returns up to `limit` PENDING outbox rows oldest-first.
+func (r *Repository) ListPendingOutbox(ctx context.Context, limit int) ([]models.OutboxRow, error) {
+	var rows []models.OutboxRow
+	if err := r.db.SelectContext(ctx, &rows,
+		`SELECT * FROM scan_events_outbox WHERE status='PENDING' ORDER BY created_at LIMIT $1`, limit); err != nil {
+		return nil, fmt.Errorf("list pending outbox: %w", err)
+	}
+	return rows, nil
+}
+
+// BumpOutboxAttempts increments the retry counter for a parked row.
+func (r *Repository) BumpOutboxAttempts(ctx context.Context, traceID string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE scan_events_outbox SET attempts=attempts+1, updated_at=now() WHERE trace_id=$1`, traceID)
+	if err != nil {
+		return fmt.Errorf("bump outbox attempts: %w", err)
+	}
+	return nil
+}
+
+// DeleteOutbox removes a parked row once its Redis SADD has succeeded.
+func (r *Repository) DeleteOutbox(ctx context.Context, traceID string) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM scan_events_outbox WHERE trace_id=$1`, traceID); err != nil {
+		return fmt.Errorf("delete outbox: %w", err)
+	}
+	return nil
 }
