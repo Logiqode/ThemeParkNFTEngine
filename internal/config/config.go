@@ -101,7 +101,7 @@ type GateConfig struct {
 }
 
 type SuiConfig struct {
-	RPCURL            string `envconfig:"SUI_RPC_URL" default:"https://fullnode.testnet.sui.io"`
+	RPCURL            string `envconfig:"SUI_RPC_URL" default:"https://sui-testnet-endpoint.blockvision.org"`
 	Network           string `envconfig:"SUI_NETWORK" default:"testnet"`
 	PackageID         string `envconfig:"SUI_PACKAGE_ID"`
 	MintCapID         string `envconfig:"SUI_MINTCAP_ID"`
@@ -115,6 +115,9 @@ type AuthConfig struct {
 	GoogleOAuthClientID     string `envconfig:"GOOGLE_OAUTH_CLIENT_ID"`
 	GoogleOAuthClientSecret string `envconfig:"GOOGLE_OAUTH_CLIENT_SECRET"`
 	EncryptionKey           string `envconfig:"ENCRYPTION_KEY"`
+	// DeterministicWalletSecret seeds HMAC email->wallet derivation (W6-B).
+	// Falls back to ENCRYPTION_KEY when empty.
+	DeterministicWalletSecret string `envconfig:"DETERMINISTIC_WALLET_SECRET"`
 }
 
 type OTelConfig struct {

@@ -68,9 +68,33 @@ func (r *Repository) ClaimVoucher(ctx context.Context, voucherID string, ownerID
 	return nil
 }
 
-func (r *Repository) RecordMint(ctx context.Context, userID int64, rideID, date, txDigest string, gasUsed int64) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO mint_logs (user_id, ride_id, mint_date, tx_digest, status, gas_used) VALUES ($1,$2,$3,$4,'CONFIRMED',$5) ON CONFLICT (user_id, ride_id, mint_date) DO UPDATE SET tx_digest=$4, status='CONFIRMED', gas_used=$5, updated_at=now()`, userID, rideID, date, txDigest, gasUsed)
+// RecordMint writes a CONFIRMED mint_logs row, idempotent on
+// (user_id, ride_id, mint_date). participantID is optional (W6-A): it attributes
+// the mint to a participant (e.g. a dependent minted into the guardian wallet).
+// The UNIQUE constraint is on (user_id, ride_id, mint_date); re-running the same
+// mint returns the existing digest (M6.3 idempotency).
+func (r *Repository) RecordMint(ctx context.Context, userID int64, participantID *int64, rideID, date, txDigest string, gasUsed int64) error {
+	_, err := r.db.ExecContext(ctx, `INSERT INTO mint_logs (user_id, participant_id, ride_id, mint_date, tx_digest, status, gas_used) VALUES ($1,$2,$3,$4,$5,'CONFIRMED',$6) ON CONFLICT (user_id, ride_id, mint_date) DO UPDATE SET tx_digest=$5, status='CONFIRMED', gas_used=$6, updated_at=now()`, userID, participantID, rideID, date, txDigest, gasUsed)
 	return err
+}
+
+// RecordMintForParticipant records a CONFIRMED mint_logs row attributed to a
+// participant (W6-A): it resolves the owning account user (guardian walk-up for
+// dependents) and writes the row with participant_id set, idempotent on
+// (user_id, ride_id, mint_date). mint_logs.user_id is NOT NULL FK → every mint
+// must be attributable to an owning account (in this model always the guardian
+// who purchased the family's tickets), so a missing owner is an error, not a
+// silent zero.
+func (r *Repository) RecordMintForParticipant(ctx context.Context, participantID int64, rideID, date, txDigest string) error {
+	ownerID, err := r.OwnerUserIDForParticipant(ctx, participantID)
+	if err != nil {
+		return err
+	}
+	if ownerID == 0 {
+		return fmt.Errorf("record mint: no owning account user for participant %d", participantID)
+	}
+	ptr := &participantID
+	return r.RecordMint(ctx, ownerID, ptr, rideID, date, txDigest, 0)
 }
 
 // ---- Rev 3: participant & durable attribution ledger (R26-R35) ----
@@ -134,6 +158,33 @@ func (r *Repository) SetParticipantWallet(ctx context.Context, id int64, state m
 		return fmt.Errorf("set participant wallet: %w", err)
 	}
 	return nil
+}
+
+// OwnerUserIDForParticipant resolves the users.id of the account that owns a
+// participant (for mint_logs attribution, W6-A). For an account-linked
+// participant this is the user with participant.account_email; for a dependent
+// it walks up the guardian chain to the family head's account_email, then maps
+// that email to users.id. Returns (0, nil) if no owning user exists yet (a
+// dependent whose guardian has no account — mint not yet attributable).
+func (r *Repository) OwnerUserIDForParticipant(ctx context.Context, participantID int64) (int64, error) {
+	// Recursive CTE walks the guardian self-ref up to an account-bearing head.
+	var userID sql.NullInt64
+	err := r.db.QueryRowContext(ctx, `
+		WITH RECURSIVE chain AS (
+			SELECT id, account_email, guardian_id FROM participants WHERE id=$1
+			UNION ALL
+			SELECT p.id, p.account_email, p.guardian_id FROM participants p
+			JOIN chain c ON p.id = c.guardian_id
+		)
+		SELECT u.id FROM chain c JOIN users u ON u.email = c.account_email
+		WHERE c.account_email IS NOT NULL LIMIT 1`, participantID).Scan(&userID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("resolve owner user for participant %d: %w", participantID, err)
+	}
+	if !userID.Valid {
+		return 0, nil
+	}
+	return userID.Int64, nil
 }
 
 // DelegateVoucher allocates a voucher to a participant (R27/R28) by linking

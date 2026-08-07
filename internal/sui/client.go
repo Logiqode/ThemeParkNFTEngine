@@ -3,9 +3,7 @@ package sui
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -17,9 +15,8 @@ import (
 )
 
 // Client wraps the Sui Go SDK for custodial mint operations.
-// Gas is sponsored by a custodial pool wallet. The private key is loaded from
-// the Sui CLI keystore file (~/.sui/sui_config/sui.keystore) which contains
-// base64-encoded ed25519 keys in the format: flag(1) || pubkey(32) || privkey(32).
+// Gas is sponsored by a custodial gas-pool wallet derived from
+// SUI_GAS_POOL_MNEMONIC (D4 fixed: no more fragile ~/.sui keystore file load).
 type Client struct {
 	rpcURL     string
 	packageID  string
@@ -28,49 +25,57 @@ type Client struct {
 	signerAddress string
 	signerPriKey  ed25519.PrivateKey
 
-	gasBudget string
+	gasBudget  string
+	concurrency chan struct{} // RPC concurrency semaphore (W6-C)
 	sdkClient suiSDK.ISuiAPI
 }
 
+// NewClient builds a Sui client whose signer is the custodial gas-pool wallet
+// derived from cfg.GasPoolMnemonic. Returns an error if the mnemonic is absent
+// or invalid (fail-fast per R3).
 func NewClient(cfg config.SuiConfig) (*Client, error) {
 	sdk := suiSDK.NewSuiClient(cfg.RPCURL)
 
-	// Load the signer's private key from the Sui CLI keystore.
-	// The keystore is a JSON array of base64-encoded keys.
-	address, priKey, err := loadKeyFromKeystore()
+	priKey, address, err := SignerFromMnemonic(cfg.GasPoolMnemonic)
 	if err != nil {
-		return nil, fmt.Errorf("load key from keystore: %w", err)
+		return nil, err
+	}
+
+	if cfg.RPCMaxConcurrency < 1 {
+		cfg.RPCMaxConcurrency = 1
 	}
 
 	log.Info().
 		Str("signer", address).
 		Str("package", cfg.PackageID).
 		Str("mint_cap", cfg.MintCapID).
-		Msg("sui client initialized")
+		Int("rpc_max_concurrency", cfg.RPCMaxConcurrency).
+		Msg("sui client initialized (mnemonic gas pool)")
 
 	return &Client{
-		rpcURL:        cfg.RPCURL,
-		packageID:     cfg.PackageID,
-		mintCapID:     cfg.MintCapID,
+		rpcURL:     cfg.RPCURL,
+		packageID:  cfg.PackageID,
+		mintCapID:  cfg.MintCapID,
 		signerAddress: address,
 		signerPriKey:  priKey,
 		gasBudget:     cfg.GasBudget,
+		concurrency:   make(chan struct{}, cfg.RPCMaxConcurrency),
 		sdkClient:     sdk,
 	}, nil
 }
 
-// DeriveSuiAddressFromJWT exchanges a Google JWT for a Sui zkLogin address.
-// Stub: real zkLogin requires the prover service or client-side proof generation.
-func (c *Client) DeriveSuiAddressFromJWT(ctx context.Context, jwt string) (suiAddress string, ephemeralKey string, proof string, err error) {
-	if len(jwt) < 20 {
-		return "", "", "", fmt.Errorf("JWT too short")
+// acquire / release implement the RPC concurrency semaphore (W6-C) so N mints
+// never exceed SUI_RPC_MAX_CONCURRENCY in-flight calls to the testnet.
+func (c *Client) acquire(ctx context.Context) error {
+	select {
+	case c.concurrency <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	log.Info().Str("jwt_prefix", jwt[:minInt(20, len(jwt))]).Msg("deriving Sui address from Google JWT")
-	addr := fmt.Sprintf("0xzk_%x", []byte(jwt)[:20])
-	ek := fmt.Sprintf("ephemeral_key_%d", time.Now().UnixNano())
-	pf := fmt.Sprintf("proof_%d", time.Now().UnixNano())
-	return addr, ek, pf, nil
 }
+
+func (c *Client) release() { <-c.concurrency }
 
 // Ping verifies Sui RPC connectivity with a lightweight chain-identifier call.
 // Used as a readiness check (R2).
@@ -82,10 +87,10 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
-// MintBatchAttendance submits a real batch mint MoveCall to the Sui blockchain.
-// Signs with the gas pool private key and retries on HTTP 429.
-// Calls attendance::mint_batch(MintCap, recipient, ride_ids, date, names, metadata_urls).
-func (c *Client) MintBatchAttendance(ctx context.Context, suiAddress string, rideIDs []string, date string, names []string, metadataURLs []string) (txDigest string, err error) {
+// MintBatchAttendance submits a real batch mint MoveCall to the Sui blockchain,
+// signing with the gas-pool key, throttled by the RPC concurrency semaphore,
+// and retrying on HTTP 429. Calls attendance::mint_batch.
+func (c *Client) MintBatchAttendance(ctx context.Context, suiAddress string, rideIDs []string, date string, names, metadataURLs []string) (txDigest string, err error) {
 	if c.packageID == "" {
 		return "", fmt.Errorf("SUI_PACKAGE_ID not configured")
 	}
@@ -98,26 +103,18 @@ func (c *Client) MintBatchAttendance(ctx context.Context, suiAddress string, rid
 
 	log.Info().
 		Str("signer", c.signerAddress).
-		Str("mint_cap", c.mintCapID).
 		Str("recipient", suiAddress).
 		Int("ride_count", len(rideIDs)).
 		Str("date", date).
 		Msg("minting batch attendance NFTs (MoveCall)")
 
-	// Arguments for attendance::mint_batch:
-	//   1. MintCap (object reference — passed as input object)
-	//   2. recipient: address
-	//   3. ride_ids: vector<vector<u8>>
-	//   4. date: u64
-	//   5. names: vector<vector<u8>>
-	//   6. metadata_urls: vector<vector<u8>>
 	args := []interface{}{
-		c.mintCapID,              // MintCap object ID
-		suiAddress,               // recipient
-		rideIDs,                  // vector<vector<u8>> ride_ids
-		toDateU64(date),          // u64 date (YYYYMMDD)
-		names,                    // vector<vector<u8>> names
-		metadataURLs,             // vector<vector<u8>> metadata_urls
+		c.mintCapID,  // MintCap object ID
+		suiAddress,   // recipient
+		rideIDs,      // vector<vector<u8>> ride_ids
+		toDateU64(date),
+		names,        // vector<vector<u8>> names
+		metadataURLs, // vector<vector<u8>> metadata_urls
 	}
 
 	moveReq := models.MoveCallRequest{
@@ -130,42 +127,42 @@ func (c *Client) MintBatchAttendance(ctx context.Context, suiAddress string, rid
 	}
 
 	for attempt := 0; attempt < 5; attempt++ {
+		if err := c.acquire(ctx); err != nil {
+			return "", err
+		}
 		txnMeta, err := c.sdkClient.MoveCall(ctx, moveReq)
+		c.release()
 		if err != nil {
-			if strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "Too Many") {
-				backoff := time.Duration(1<<uint(attempt)) * time.Second
-				log.Warn().Err(err).Int("attempt", attempt+1).Dur("backoff", backoff).Msg("RPC throttled, retrying")
-				select {
-				case <-time.After(backoff):
-					continue
-				case <-ctx.Done():
+			if isThrottled(err) {
+				if !backoff(ctx, attempt) {
 					return "", ctx.Err()
 				}
+				continue
 			}
 			return "", fmt.Errorf("moveCall failed (attempt %d): %w", attempt+1, err)
 		}
 
+		if err := c.acquire(ctx); err != nil {
+			return "", err
+		}
 		resp, err := c.sdkClient.SignAndExecuteTransactionBlock(ctx, models.SignAndExecuteTransactionBlockRequest{
 			TxnMetaData: txnMeta,
 			PriKey:      c.signerPriKey,
 			Options: models.SuiTransactionBlockOptions{
-				ShowInput:        true,
-				ShowEffects:      true,
-				ShowEvents:       true,
+				ShowInput:         true,
+				ShowEffects:       true,
+				ShowEvents:        true,
 				ShowObjectChanges: true,
 			},
 			RequestType: "WaitForLocalExecution",
 		})
+		c.release()
 		if err != nil {
-			if strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "Too Many") {
-				backoff := time.Duration(1<<uint(attempt)) * time.Second
-				log.Warn().Err(err).Int("attempt", attempt+1).Dur("backoff", backoff).Msg("exec RPC throttled, retrying")
-				select {
-				case <-time.After(backoff):
-					continue
-				case <-ctx.Done():
+			if isThrottled(err) {
+				if !backoff(ctx, attempt) {
 					return "", ctx.Err()
 				}
+				continue
 			}
 			return "", fmt.Errorf("signAndExecute failed (attempt %d): %w", attempt+1, err)
 		}
@@ -173,12 +170,74 @@ func (c *Client) MintBatchAttendance(ctx context.Context, suiAddress string, rid
 		digest := resp.Digest
 		log.Info().
 			Str("tx_digest", digest).
-			Int("attempt", attempt+1).
 			Str("status", resp.Effects.Status.Status).
 			Msg("mint transaction executed")
 		return digest, nil
 	}
 	return "", fmt.Errorf("mint batch failed after 5 attempts")
+}
+
+// TransferNFT performs the R33/M6.7 custody object transfer: moves an
+// AttendanceNFT object from the custodial wallet (signer) to a dependent's own
+// non-custodial wallet. It uses the Sui `transfer` (or transfer_object)
+// primitive; throttled + retried like mints.
+func (c *Client) TransferNFT(ctx context.Context, nftObjectID, toAddress string) (txDigest string, err error) {
+	if nftObjectID == "" || toAddress == "" {
+		return "", fmt.Errorf("nft_object_id and to_address required for custody transfer")
+	}
+	log.Info().
+		Str("signer", c.signerAddress).
+		Str("nft_object", nftObjectID).
+		Str("to", toAddress).
+		Msg("transferring custody of attendance NFT")
+
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := c.acquire(ctx); err != nil {
+			return "", err
+		}
+		txnMeta, err := c.sdkClient.TransferObject(ctx, models.TransferObjectRequest{
+			Signer:     c.signerAddress,
+			ObjectId:   nftObjectID,
+			Recipient:  toAddress,
+			GasBudget:  c.gasBudget,
+		})
+		c.release()
+		if err != nil {
+			if isThrottled(err) {
+				if !backoff(ctx, attempt) {
+					return "", ctx.Err()
+				}
+				continue
+			}
+			return "", fmt.Errorf("transferObject failed (attempt %d): %w", attempt+1, err)
+		}
+
+		if err := c.acquire(ctx); err != nil {
+			return "", err
+		}
+		resp, err := c.sdkClient.SignAndExecuteTransactionBlock(ctx, models.SignAndExecuteTransactionBlockRequest{
+			TxnMetaData: txnMeta,
+			PriKey:      c.signerPriKey,
+			Options: models.SuiTransactionBlockOptions{
+				ShowEffects:       true,
+				ShowObjectChanges: true,
+			},
+			RequestType: "WaitForLocalExecution",
+		})
+		c.release()
+		if err != nil {
+			if isThrottled(err) {
+				if !backoff(ctx, attempt) {
+					return "", ctx.Err()
+				}
+				continue
+			}
+			return "", fmt.Errorf("signAndExecute transfer failed (attempt %d): %w", attempt+1, err)
+		}
+		log.Info().Str("tx_digest", resp.Digest).Msg("custody transfer executed")
+		return resp.Digest, nil
+	}
+	return "", fmt.Errorf("custody transfer failed after 5 attempts")
 }
 
 // ── Internal helpers ──
@@ -193,100 +252,24 @@ func toDateU64(date string) uint64 {
 	return d
 }
 
-// loadKeyFromKeystore reads the Sui CLI keystore file and returns the address
-// and ed25519 private key of the first (or selected) wallet.
-// The keystore format is a JSON array of base64-encoded 33-byte keys:
-//
-//	[0x00 flag] [32-byte private key]
-//
-// Sui CLI uses the same keystore for both the deployer and gas pool wallets.
-func loadKeyFromKeystore() (address string, priKey ed25519.PrivateKey, err error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", nil, fmt.Errorf("get home dir: %w", err)
+// isThrottled reports whether an SDK error is an HTTP 429 (rate limit) so the
+// caller retries with exponential backoff.
+func isThrottled(err error) bool {
+	if err == nil {
+		return false
 	}
-
-	keystorePath := home + "/.sui/sui_config/sui.keystore"
-	data, err := os.ReadFile(keystorePath)
-	if err != nil {
-		return "", nil, fmt.Errorf("read keystore at %s: %w", keystorePath, err)
-	}
-
-	// The keystore is a JSON array of base64 strings
-	var keys []string
-	// Simple parsing: the file is a JSON array like ["base64key1","base64key2"]
-	content := strings.TrimSpace(string(data))
-	content = strings.TrimPrefix(content, "[")
-	content = strings.TrimSuffix(content, "]")
-	parts := strings.Split(content, ",")
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		part = strings.Trim(part, "\"")
-		if part != "" {
-			keys = append(keys, part)
-		}
-	}
-
-	if len(keys) == 0 {
-		return "", nil, fmt.Errorf("no keys found in keystore")
-	}
-
-	// Use the last key (most recently imported — your Slush wallet)
-	keyB64 := keys[len(keys)-1]
-	log.Info().Str("keystore_path", keystorePath).Int("key_count", len(keys)).Msg("loaded key from Sui keystore")
-
-	return decodeKeystoreKey(keyB64)
+	s := err.Error()
+	return strings.Contains(s, "429") || strings.Contains(s, "Too Many") || strings.Contains(s, "rate limit")
 }
 
-// decodeKeystoreKey decodes a base64-encoded key from the Sui keystore.
-// Format: 1-byte flag (0x00 for ed25519) + 32-byte public key + 32-byte private key = 65 bytes.
-// OR:    1-byte flag (0x00 for ed25519) + 32-byte private key = 33 bytes (newer format).
-func decodeKeystoreKey(b64 string) (address string, priKey ed25519.PrivateKey, err error) {
-	data, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return "", nil, fmt.Errorf("base64 decode key: %w", err)
+// backoff sleeps 2^attempt seconds, honoring context cancellation.
+func backoff(ctx context.Context, attempt int) bool {
+	d := time.Duration(1<<uint(attempt)) * time.Second
+	log.Warn().Int("attempt", attempt+1).Dur("backoff", d).Msg("RPC throttled, retrying")
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
 	}
-
-	var privBytes []byte
-	switch len(data) {
-	case 33:
-		// New format: flag(1) + privkey(32)
-		privBytes = data[1:]
-	case 65:
-		// Old format: flag(1) + pubkey(32) + privkey(32)
-		privBytes = data[33:]
-	default:
-		return "", nil, fmt.Errorf("unexpected key length: %d", len(data))
-	}
-
-	priKey = ed25519.NewKeyFromSeed(privBytes)
-
-	// Derive address from the public key
-	pubKey := priKey.Public().(ed25519.PublicKey)
-	address = pubKeyToSuiAddress(pubKey)
-
-	return address, priKey, nil
-}
-
-// pubKeyToSuiAddress derives a Sui address from an ed25519 public key.
-// Sui address = blake2b(0x00 || pubkey) truncated to 32 bytes, hex-encoded.
-func pubKeyToSuiAddress(pubKey ed25519.PublicKey) string {
-	// blake2b is in golang.org/x/crypto/blake2b
-	// But we need to avoid the import if possible. Use a simple fallback.
-	// For the portfolio demo, we'll derive via the SDK's approach.
-	// The SDK uses blake2b.Sum256(append([]byte{0x00}, pubKey...))
-	// Since we already have golang.org/x/crypto/blake2b in go.mod, we can use it here.
-
-	// But actually — let's just log the public key and let the SDK handle address matching.
-	// The SignAndExecuteTransactionBlock doesn't need the address to be pre-derived;
-	// the MoveCall's Signer field already tells the chain who is signing.
-
-	return fmt.Sprintf("0x%x", pubKey[:20]) // simplified; in production use blake2b
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

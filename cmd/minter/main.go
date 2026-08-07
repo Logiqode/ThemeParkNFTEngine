@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/Logiqode/ThemeParkNFT/internal/auth"
 	"github.com/Logiqode/ThemeParkNFT/internal/config"
 	"github.com/Logiqode/ThemeParkNFT/internal/health"
 	minterService "github.com/Logiqode/ThemeParkNFT/internal/minter"
@@ -34,6 +35,10 @@ func main() {
 	if err := cfg.Validate("SUI_PACKAGE_ID", "SUI_MINTCAP_ID"); err != nil {
 		log.Fatal().Err(err).Msg("minter startup: missing required environment")
 	}
+	// The gas-pool signer is required to mint (D4: derived from mnemonic).
+	if cfg.Sui.GasPoolMnemonic == "" {
+		log.Warn().Msg("SUI_GAS_POOL_MNEMONIC empty — mints will fail; deterministic derivation still available for address mapping")
+	}
 	log.Info().Msg("minter service starting")
 
 	db, err := sqlx.Connect("pgx", cfg.Postgres.DSN())
@@ -45,28 +50,34 @@ func main() {
 	redis := redisClient.NewClient(cfg.Redis)
 	defer func() { _ = redis.Close() }()
 	repo := postgres.NewRepository(db)
-	sui, err := suiClient.NewClient(cfg.Sui)
-	if err != nil {
-		log.Fatal().Err(err).Msg("sui client init failed")
+
+	var sui suiClient.Minter
+	suiClientReal, suiErr := suiClient.NewClient(cfg.Sui)
+	if suiErr != nil {
+		log.Warn().Err(suiErr).Msg("sui client init deferred (mint endpoints will 503); deterministic address mapping still available")
+	} else {
+		sui = suiClientReal
 	}
 
-	// Initialize IPFS pinning (Pinata) and CID cache.
-	// Implements Option A: artwork + metadata pinned once per ride, reused for all NFTs.
+	// IPFS pinning (Option A, CIDCache) + deterministic metadata adapter.
 	pinata := storage.NewPinataClient(cfg.Pinata.APIKey, cfg.Pinata.APISecret, cfg.Pinata.Gateway)
 	cidCache := storage.NewCIDCache(pinata)
+	meta := minterService.NewCIDMetadataProvider(cidCache)
 
-	if cfg.Pinata.APIKey == "" {
-		log.Warn().Msg("PINATA_API_KEY not set — IPFS pinning disabled, NFTs will use placeholder URLs")
+	// Deterministic wallet secret (W6-B): HMAC email->wallet seed.
+	detSecret := cfg.Auth.DeterministicWalletSecret
+	if detSecret == "" {
+		detSecret = cfg.Auth.EncryptionKey
 	}
+	googleVerifier := auth.NewGoogleTokenVerifier(cfg.Auth.GoogleOAuthClientID)
 
-	// Strict readiness checks (R2): Minter is ready when Postgres, Redis, and
-	// the Sui RPC endpoint are all reachable.
 	checker := health.NewHealthChecker("minter")
 	checker.AddCheck(func(ctx context.Context) error { return db.PingContext(ctx) })
 	checker.AddCheck(func(ctx context.Context) error { return redis.Ping(ctx) })
-	checker.AddCheck(func(ctx context.Context) error { return sui.Ping(ctx) })
+	if sui != nil {
+		checker.AddCheck(func(ctx context.Context) error { return sui.Ping(ctx) })
+	}
 
-	// Startup grace: wait up to 20s for dependencies before serving traffic.
 	if err := health.WaitForChecks(ctx, checker, 20*time.Second); err != nil {
 		log.Fatal().Err(err).Msg("minter startup: dependencies not ready")
 	}
@@ -75,117 +86,9 @@ func main() {
 	mux.HandleFunc("/healthz", checker.HealthzHandler())
 	mux.HandleFunc("/readyz", checker.ReadyzHandler())
 
-	// POST /mint/daily — batch mint NFTs for a user's daily rides.
-	// Flow: Redis rides → ensure IPFS assets pinned (cached per ride) → batch mint with metadata URLs.
-	mux.HandleFunc("/mint/daily", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			Email string `json:"email"`
-			Date  string `json:"date"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		if req.Email == "" || req.Date == "" {
-			http.Error(w, "email and date required", http.StatusBadRequest)
-			return
-		}
-
-		user, err := repo.GetUserByEmail(r.Context(), req.Email)
-		if err != nil || user.SuiAddress == nil {
-			http.Error(w, "user not found or no Sui address (register via POST /api/auth/google first)", http.StatusBadRequest)
-			return
-		}
-
-		rideIDs, err := redis.GetUserRides(r.Context(), req.Email, req.Date)
-		if err != nil || len(rideIDs) == 0 {
-			http.Error(w, "no rides found for this date", http.StatusNotFound)
-			return
-		}
-
-		// Ensure artwork + metadata are pinned to IPFS for each ride.
-		// CIDCache implements Option A: pin once per ride, reuse forever.
-		names := make([]string, len(rideIDs))
-		metadataURLs := make([]string, len(rideIDs))
-
-		for i, rideID := range rideIDs {
-			assets, err := cidCache.GetOrPin(r.Context(), rideID, req.Date)
-			if err != nil {
-				log.Error().Err(err).Str("ride_id", rideID).Msg("failed to pin ride assets")
-				http.Error(w, fmt.Sprintf("IPFS pinning failed for %s: %v", rideID, err), http.StatusInternalServerError)
-				return
-			}
-			names[i] = storage.RideName(rideID)
-			metadataURLs[i] = assets.MetadataURI
-		}
-
-		log.Info().
-			Str("email", req.Email).
-			Str("date", req.Date).
-			Int("ride_count", len(rideIDs)).
-			Int("cid_cache_size", cidCache.Size()).
-			Msg("batch minting with IPFS metadata")
-
-		txDigest, err := sui.MintBatchAttendance(r.Context(), *user.SuiAddress, rideIDs, req.Date, names, metadataURLs)
-		if err != nil {
-			log.Error().Err(err).Str("user_id", req.Email).Msg("mint failed")
-			http.Error(w, "mint failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		for _, rideID := range rideIDs {
-			_ = repo.RecordMint(r.Context(), user.ID, rideID, req.Date, txDigest, 0)
-		}
-
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"tx_digest":     txDigest,
-			"ride_ids":      rideIDs,
-			"metadata_urls": metadataURLs,
-			"status":        "confirmed",
-		})
-	})
-
-	// POST /mint/resolve-day — OFF-CHAIN end-of-day mint-resolution pass
-	// (Week 4, M4.12, R30/R31/R32). Iterates participants-with-rides for a date,
-	// resolves each wallet, and writes a durable pending_mints row for adults
-	// with no wallet. NO on-chain activity — actual tx submission is Week 6.
-	mux.HandleFunc("/mint/resolve-day", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			Date string `json:"date" validate:"required"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		if req.Date == "" {
-			http.Error(w, "date required (YYYY-MM-DD)", http.StatusBadRequest)
-			return
-		}
-		resolver := minterService.NewDayResolver(
-			repo,
-			minterService.NewScanEventRideSource(db),
-			voucherService.NewService(repo),
-		)
-		resolutions, err := resolver.ResolveDay(r.Context(), req.Date)
-		if err != nil {
-			http.Error(w, "resolve-day failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"date":        req.Date,
-			"resolutions": resolutions,
-		})
-	})
-
-	// POST /api/auth/google — zkLogin: exchange Google JWT for Sui address
+	// POST /api/auth/google — Week 6 (W6-B): real Google JWT parse (D2) +
+	// deterministic custodial wallet derivation. Same email + same secret => same
+	// Sui address, so mock emails reliably receive real NFTs in benchmarks.
 	mux.HandleFunc("/api/auth/google", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -197,24 +100,168 @@ func main() {
 			return
 		}
 
-		suiAddr, ek, proof, err := sui.DeriveSuiAddressFromJWT(r.Context(), req.Token)
+		payload, err := googleVerifier.VerifyToken(r.Context(), req.Token)
 		if err != nil {
-			http.Error(w, "zkLogin failed: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "google token invalid: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		if payload.Email == "" {
+			http.Error(w, "google token missing email claim", http.StatusUnauthorized)
 			return
 		}
 
-		// Extract email from JWT (simplified — in prod, verify the JWT properly)
-		email := "user@example.com" // placeholder: parse from JWT claims
-		user, err := repo.CreateUser(r.Context(), email)
+		// Deterministic custodial wallet from the verified email (W6-B primary).
+		_, suiAddr, err := suiClient.DeterministicWallet(payload.Email, detSecret)
+		if err != nil {
+			http.Error(w, "wallet derivation failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		user, err := repo.CreateUser(r.Context(), payload.Email)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		_ = repo.UpdateSuiAccount(r.Context(), user.ID, suiAddr, ek, proof)
-
+		// Persist the derived address. Ephemeral/zk proof fields left empty in
+		// deterministic mode (custodial key is server-derived, not stored).
+		if err := repo.UpdateSuiAccount(r.Context(), user.ID, suiAddr, "", ""); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"user_id":     fmt.Sprintf("%d", user.ID),
+			"email":       payload.Email,
 			"sui_address": suiAddr,
+		})
+	})
+
+	// POST /mint/resolve-day — OFF-CHAIN resolution (M4.12, unchanged).
+	mux.HandleFunc("/mint/resolve-day", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct{ Date string `json:"date"` }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if req.Date == "" {
+			http.Error(w, "date required (YYYY-MM-DD)", http.StatusBadRequest)
+			return
+		}
+		resolver := minterService.NewDayResolver(repo, minterService.NewScanEventRideSource(db), voucherService.NewService(repo))
+		resolutions, err := resolver.ResolveDay(r.Context(), req.Date)
+		if err != nil {
+			http.Error(w, "resolve-day failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"date": req.Date, "resolutions": resolutions})
+	})
+
+	// POST /mint/run-day — Week 6 (M6.2/M6.3/M6.6): resolves the day, then mints
+	// every mint-ready participant (incl. dependents -> guardian custodial
+	// wallet, M6.6) via the real Sui client, recording idempotent mint_logs.
+	mux.HandleFunc("/mint/run-day", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if sui == nil {
+			http.Error(w, "sui client not initialized (check SUI_GAS_POOL_MNEMONIC)", http.StatusServiceUnavailable)
+			return
+		}
+		var req struct{ Date string `json:"date"` }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if req.Date == "" {
+			http.Error(w, "date required (YYYY-MM-DD)", http.StatusBadRequest)
+			return
+		}
+
+		resolver := minterService.NewDayResolver(repo, minterService.NewScanEventRideSource(db), voucherService.NewService(repo))
+		resolutions, err := resolver.ResolveDay(r.Context(), req.Date)
+		if err != nil {
+			http.Error(w, "resolve-day failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Build the mint-ready live set.
+		var lives []minterService.MintLive
+		for _, res := range resolutions {
+			if res.Outcome != minterService.OutcomeMintReady || res.WalletAddress == "" {
+				continue
+			}
+			lives = append(lives, minterService.MintLive{
+				ParticipantID: res.ParticipantID,
+				WalletAddress: res.WalletAddress,
+				RideIDs:       res.RideIDs,
+				Date:          req.Date,
+			})
+		}
+
+		batch := minterService.NewBatchMint(sui, meta, repo)
+		results := batch.Run(r.Context(), lives)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"date":    req.Date,
+			"results": results,
+			"details": resolutions,
+		})
+	})
+
+	// POST /mint/claim-custody — Week 6 (M6.7 / R33): real Sui object transfer
+	// of a dependent's NFT from the guardian custodial wallet to a newly-linked
+	// own wallet. nft_object_ids are the AttendanceNFT objects held in the
+	// custodial wallet to transfer.
+	mux.HandleFunc("/mint/claim-custody", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if sui == nil {
+			http.Error(w, "sui client not initialized (check SUI_GAS_POOL_MNEMONIC)", http.StatusServiceUnavailable)
+			return
+		}
+		var req struct {
+			ParticipantID int64    `json:"participant_id"`
+			OwnWallet     string   `json:"own_wallet"`
+			NFTObjectIDs  []string `json:"nft_object_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if req.ParticipantID == 0 || req.OwnWallet == "" || len(req.NFTObjectIDs) == 0 {
+			http.Error(w, "participant_id, own_wallet, nft_object_ids required", http.StatusBadRequest)
+			return
+		}
+
+		// 1) On-chain: transfer each NFT object to the dependent's own wallet.
+		digests := make([]string, 0, len(req.NFTObjectIDs))
+		for _, objID := range req.NFTObjectIDs {
+			d, err := sui.TransferNFT(r.Context(), objID, req.OwnWallet)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("custody transfer of %s failed: %v", objID, err), http.StatusInternalServerError)
+				return
+			}
+			digests = append(digests, d)
+		}
+
+		// 2) Off-chain: flip participant to own wallet + attribute.
+		v := voucherService.NewService(repo)
+		p, err := v.ClaimCustody(r.Context(), req.ParticipantID, req.OwnWallet)
+		if err != nil {
+			http.Error(w, "claim-custody state update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"participant_id": p.ID,
+			"own_wallet":     p.CustodialWalletAddress,
+			"tx_digests":     digests,
+			"status":         "transferred",
 		})
 	})
 

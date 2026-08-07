@@ -118,6 +118,11 @@ type ScanRecord struct {
 type MintLog struct {
 	ID        int64      `db:"id"`
 	UserID    int64      `db:"user_id"`
+	// ParticipantID attributes the mint to the participant (R31/R32). For a
+	// dependent whose NFT is minted into the guardian custodial wallet, this is
+	// the dependent; UserID is the guardian/account that triggered the mint.
+	// NULL for pre-W6 mint_logs rows.
+	ParticipantID *int64    `db:"participant_id"`
 	RideID    string     `db:"ride_id"`
 	MintDate  string     `db:"mint_date"`
 	TxDigest  *string    `db:"tx_digest"`
