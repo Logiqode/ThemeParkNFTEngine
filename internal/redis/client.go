@@ -273,6 +273,17 @@ func (c *Client) Ping(ctx context.Context) error {
 	return c.rdb.Ping(ctx).Err()
 }
 
+// FlushDB clears every key in the currently selected logical database. It backs
+// the demo orchestrator's full-stack reset (the Redis counterpart of truncating
+// the app tables). Destructive — only invoked by an explicit user reset.
+func (c *Client) FlushDB(ctx context.Context) error {
+	if err := c.rdb.FlushDB(ctx).Err(); err != nil {
+		return fmt.Errorf("flushdb: %w", err)
+	}
+	log.Info().Msg("redis flushdb complete")
+	return nil
+}
+
 // Close shuts down the Redis client.
 func (c *Client) Close() error {
 	log.Info().Msg("redis client closing")

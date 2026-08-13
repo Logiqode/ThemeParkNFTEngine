@@ -20,16 +20,16 @@ import (
 // Gas is sponsored by a custodial gas-pool wallet derived from
 // SUI_GAS_POOL_MNEMONIC (D4 fixed: no more fragile ~/.sui keystore file load).
 type Client struct {
-	rpcURL     string
-	packageID  string
-	mintCapID  string // MintCap object ID (required for mint calls)
+	rpcURL    string
+	packageID string
+	mintCapID string // MintCap object ID (required for mint calls)
 
 	signerAddress string
 	signerPriKey  ed25519.PrivateKey
 
-	gasBudget  string
+	gasBudget   string
 	concurrency chan struct{} // RPC concurrency semaphore (W6-C)
-	sdkClient suiSDK.ISuiAPI
+	sdkClient   suiSDK.ISuiAPI
 }
 
 // NewClient builds a Sui client whose signer is the custodial gas-pool wallet
@@ -55,9 +55,9 @@ func NewClient(cfg config.SuiConfig) (*Client, error) {
 		Msg("sui client initialized (mnemonic gas pool)")
 
 	return &Client{
-		rpcURL:     cfg.RPCURL,
-		packageID:  cfg.PackageID,
-		mintCapID:  cfg.MintCapID,
+		rpcURL:        cfg.RPCURL,
+		packageID:     cfg.PackageID,
+		mintCapID:     cfg.MintCapID,
 		signerAddress: address,
 		signerPriKey:  priKey,
 		gasBudget:     cfg.GasBudget,
@@ -111,11 +111,11 @@ func (c *Client) MintBatchAttendance(ctx context.Context, suiAddress string, rid
 		Msg("minting batch attendance NFTs (MoveCall)")
 
 	args := []interface{}{
-		c.mintCapID,  // MintCap object ID
-		suiAddress,   // recipient
-		encodeBytesVec(rideIDs),     // vector<vector<u8>> ride_ids
-		toDateHex(date),             // u64 date (hex string, JSON-RPC pure)
-		encodeBytesVec(names),       // vector<vector<u8>> names
+		c.mintCapID,                  // MintCap object ID
+		suiAddress,                   // recipient
+		encodeBytesVec(rideIDs),      // vector<vector<u8>> ride_ids
+		toDateHex(date),              // u64 date (hex string, JSON-RPC pure)
+		encodeBytesVec(names),        // vector<vector<u8>> names
 		encodeBytesVec(metadataURLs), // vector<vector<u8>> metadata_urls
 	}
 
@@ -199,10 +199,10 @@ func (c *Client) TransferNFT(ctx context.Context, nftObjectID, toAddress string)
 			return "", err
 		}
 		txnMeta, err := c.sdkClient.TransferObject(ctx, models.TransferObjectRequest{
-			Signer:     c.signerAddress,
-			ObjectId:   nftObjectID,
-			Recipient:  toAddress,
-			GasBudget:  c.gasBudget,
+			Signer:    c.signerAddress,
+			ObjectId:  nftObjectID,
+			Recipient: toAddress,
+			GasBudget: c.gasBudget,
 		})
 		c.release()
 		if err != nil {

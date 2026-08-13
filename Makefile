@@ -1,4 +1,4 @@
-.PHONY: up down migrate migrate-up migrate-down migrate-version healthy build test test-integration bench-milestones bench-congestion bench-verify lint tidy clean reset
+.PHONY: up down migrate migrate-up migrate-down migrate-version healthy build test test-integration bench-milestones bench-congestion bench-verify lint tidy clean reset demo reset-demo
 
 # Start all services via docker-compose
 up:
@@ -41,6 +41,18 @@ build:
 	go build -o bin/minter ./cmd/minter
 	go build -o bin/voucher ./cmd/voucher
 	go build -o bin/migrate ./cmd/migrate
+	go build -o bin/demo ./cmd/demo
+
+# Run the demo orchestrator API (port :8090, requires healthy stack + .env).
+demo:
+	go run ./cmd/demo
+
+# Data-layer reset via the demo orchestrator's /api/demo/reset endpoint.
+# (Faster than make reset: truncates app tables + flushes Redis without
+# tearing down Docker containers.)
+reset-demo:
+	curl -sS -X POST http://localhost:8090/api/demo/reset
+	@echo ""
 
 # Run tests
 test:

@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jmoiron/sqlx"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
@@ -94,7 +94,9 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Token string `json:"token"` }
+		var req struct {
+			Token string `json:"token"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
@@ -141,7 +143,9 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{ Date string `json:"date"` }
+		var req struct {
+			Date string `json:"date"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
@@ -171,7 +175,9 @@ func main() {
 			http.Error(w, "sui client not initialized (check SUI_GAS_POOL_MNEMONIC)", http.StatusServiceUnavailable)
 			return
 		}
-		var req struct{ Date string `json:"date"` }
+		var req struct {
+			Date string `json:"date"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return

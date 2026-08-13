@@ -548,6 +548,116 @@ KAFKA_BROKERS=localhost:29092
 └── memory-bank/      # Project documentation
 ```
 
+## Frontend Test Runner (Demo Orchestrator + React UI)
+
+A portfolio-facing "test runner" that lets a non-Web3 visitor watch the
+theme-park → on-chain flow in action. It runs **4 scenarios that each fire
+exactly 10 real Sui-testnet transactions**, renders the ordered flow with
+on-chain/off-chain/mock steps visually distinguished, links tx digests to
+Suiscan, and exposes a wallet viewer + full-stack reset.
+
+### Services
+
+| Service | Port | Description |
+|---|---|---|
+| **Demo Orchestrator** | `8090` | `cmd/demo` — seeds deterministic guardians/dependents, runs scenarios, queries wallets |
+| **Frontend (Vite)** | `5173` | React 18 + TypeScript UI in `frontend/` |
+
+### Scenarios
+
+Each scenario fires **exactly 10 real Sui-testnet transactions** (sponsored by
+the gas pool), isolated by deterministic per-scenario dates so re-running is
+idempotent (no duplicate on-chain txs).
+
+| Scenario | What it proves |
+|---|---|
+| **2a** | NFC binding + **10 wallet probes** (sponsored SUI transfers gas-pool → derived wallet, proving the address is live). 8 standalone guardians get 1 probe each; Guardian-0009 has 1 dependent — the dependent has **no wallet**, so its probe is **pushed into the guardian wallet**, giving that guardian **2 transactions pushed**. Ends with "Wristband Account Pairing Successful · 1 Dependent". |
+| **2b** | Batch mint **10 guardians** → their own non-custodial wallets |
+| **2c** | Batch mint **10 dependents** → each NFT lands in the **guardian custodial wallet** (dependents share the guardian address). Includes an on-chain reverse-object check verifying the created NFT's owner == guardian wallet. |
+| **2d** | **5 guardian + 5 dependent** mints, randomized order (mixed family-park day) |
+
+### Requirements
+
+- The full backing stack up: `make up && make healthy && make migrate-up`.
+- `.env` populated (the demo binary auto-reads `.env` from the repo root):
+  - `SUI_PACKAGE_ID`, `SUI_MINTCAP_ID` — deployed attendance contract
+  - `SUI_GAS_POOL_MNEMONIC` — funded on testnet (the pool sponsors all gas)
+  - `PINATA_JWT` — required for mint-metadata (2b/2c/2d); 2a probes don't need it
+  - `DETERMINISTIC_WALLET_SECRET` (falls back to `ENCRYPTION_KEY`) — seeds emails → wallets
+- Node 18+ for the frontend (tested with Node 22 in WSL).
+
+> **Note on cost:** a full sweep (2a+2b+2c+2d) = **40 on-chain txs** drawn from
+> the gas pool. Testnet gas is negligible, but repeated sweeps can deplete the
+> pool — keep an eye on the balance via the testnet explorer / `sui_getCoins`
+> and top up through the faucet if needed.
+
+### Run
+
+```bash
+# 1. Backing stack + health + migrations (from repo root)
+make up
+make healthy      # waits until PG/Redis/Kafka are ready (requires jq)
+make migrate-up
+
+# 2. Demo orchestrator (port :8090)
+make demo
+# → reads .env automatically; blocks until PG/Redis/Kafka/Sui are ready
+
+# 3. Frontend (separate terminal)
+cd frontend
+npm install       # first time only
+npm run dev
+# → http://localhost:5173
+```
+
+#### Test it yourself (in the UI)
+
+1. Open **http://localhost:5173**. The **health gate** runs first — test-run
+   buttons stay **disabled** until PG, Redis, Kafka, and Sui all report healthy.
+2. **Tests →** pick a scenario (**2a / 2b / 2c / 2d**) → **Run**.
+   - A color-coded **flow** shows each step: 🟢 off-chain · 🔵 mock · ⛓️ on-chain
+     (on-chain steps carry a clickable **Suiscan** digest link).
+   - A **transaction table** lists all 10 txs: participant · kind · recipient
+     wallet · status · clickable digest.
+   - **2c/2d** add a "Verify: minted into guardian wallet `0x…`" callout backed
+     by a real on-chain reverse-object check.
+3. **Wallet →** paste any derived wallet address from a transaction card to see
+   its balance, owned `AttendanceNFT` objects (linked to Suiscan), and off-chain
+   ride attribution grouped **guardian's own** vs **each dependent**. (Dependents
+   share the guardian address, so their NFTs appear under the guardian row.)
+4. **Reset →** two-step confirm wipes all app tables + Redis (idempotent
+   re-seeding; each subsequent run rebuilds its data). Health re-checks after.
+
+#### Test it yourself (API / curl)
+
+```bash
+# Health (gate your runs on this)
+curl -s http://localhost:8090/api/demo/health
+
+# Seed + run 2b (10 guardian mints)
+curl -s -X POST http://localhost:8090/api/demo/seed -d '{"scenario":"2b"}'
+curl -s -X POST http://localhost:8090/api/demo/run  -d '{"scenario":"2b"}'
+
+# Resolve a wallet's objects + attribution
+curl -s "http://localhost:8090/api/demo/wallet?address=0x…"
+
+# Full-stack reset
+curl -s -X POST http://localhost:8090/api/demo/reset
+```
+
+### Demo API
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/demo/health` | Aggregate PG/Redis/Kafka/Sui readiness |
+| POST | `/api/demo/seed` `{"scenario":"2a"}` | Idempotently seed a scenario's participants + rides |
+| POST | `/api/demo/run` `{"scenario":"2b"}` | Run a scenario; returns `steps` + `transactions` |
+| POST | `/api/demo/reset` | Truncate app tables + flush Redis (explicit reset only) |
+| GET | `/api/demo/wallet?address=0x…` | Owned NFT objects + off-chain attribution |
+
+Environment additions (see `.env.example`): `DEMO_PORT=8090`,
+`DEMO_PROBE_AMOUNT_MIST=1000000` (the 2a probe amount, 0.001 SUI).
+
 ## License
 
 Proprietary. All rights reserved.

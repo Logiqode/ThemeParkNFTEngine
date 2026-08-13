@@ -25,6 +25,7 @@ type Config struct {
 	Pinata   PinataConfig
 	OTel     OTelConfig
 	AWS      AWSConfig
+	Demo     DemoConfig
 }
 
 type AppConfig struct {
@@ -32,6 +33,17 @@ type AppConfig struct {
 	Name     string `envconfig:"APP_NAME" default:"theme-park-nft-engine"`
 	Port     int    `envconfig:"APP_PORT" default:"8080"`
 	LogLevel string `envconfig:"LOG_LEVEL" default:"info"`
+}
+
+// DemoConfig configures the frontend-test-runner demo orchestrator (cmd/demo).
+type DemoConfig struct {
+	// Port is the HTTP listen port for the demo orchestrator API.
+	Port int `envconfig:"DEMO_PORT" default:"8090"`
+	// ProbeAmountMist is the SUI amount (in MIST) the 2a wallet probe transfers
+	// from the gas pool to a derived wallet to prove the address is live on-chain.
+	// 1 SUI == 1,000,000,000 MIST; the default is 0.001 SUI to keep gas-pool
+	// depletion negligible across repeated demo sweeps.
+	ProbeAmountMist string `envconfig:"DEMO_PROBE_AMOUNT_MIST" default:"1000000"`
 }
 
 type PostgresConfig struct {
@@ -122,7 +134,7 @@ type AuthConfig struct {
 
 type OTelConfig struct {
 	ExporterEndpoint string `envconfig:"OTEL_EXPORTER_OTLP_ENDPOINT" default:"http://localhost:4317"`
-	ServiceName       string `envconfig:"OTEL_SERVICE_NAME" default:"theme-park-nft-engine"`
+	ServiceName      string `envconfig:"OTEL_SERVICE_NAME" default:"theme-park-nft-engine"`
 	DDAPIKey         string `envconfig:"DD_API_KEY"`
 	DDSite           string `envconfig:"DD_SITE" default:"datadoghq.com"`
 }

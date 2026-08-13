@@ -479,6 +479,35 @@ theme-park-nft-engine/
 
 ---
 
+## Week 6.5 — Frontend Test-Runner + Demo Orchestrator (2026-08-13, EXECUTED)
+
+**Goal (user decision 2026-08-13):** defer non-core work (real OAuth/zkLogin proof-gen, Datadog, AWS) and build a **portfolio-facing frontend** so a non-Web3 visitor can watch the park → on-chain flow. Delivers four reproducible scenarios that each fire **exactly 10 real Sui-testnet transactions**, rendered with on-chain/off-chain/mock steps visually distinguished.
+
+### Design decisions (user-confirmed)
+1. **2a wallet probe** = sponsored SUI transfer gas-pool → derived wallet (proves the address is live; dependents probe to the guardian).
+2. **2d** = 5 guardian-only + 5 guardian-with-1-dependent mints, **randomized order**. Dependents have no wallet; rewards delegate to the guardian. 2c reuses 2b's guardians.
+3. **New `cmd/demo` orchestrator (`:8090`)** (not extending `minter`).
+4. **No auto-reset** — runs are additive; only an explicit Reset wipes the stack.
+5. **TypeScript** frontend.
+
+### Backend
+- [x] `internal/sui/reader.go` — `sui.Reader` interface (`TransferSuiProbe`, `TransactionStatus`, `OwnedNFTs`, `BalanceMist`), separate from `sui.Minter`. Uses block-vision SDK `unsafe_transferSui`/`sui_getTransactionBlock`/`suix_getOwnedObjects`/`suix_getBalance`.
+- [x] `cmd/demo/main.go` + `internal/demo/{orchestrator,seed,scenarios,wallet,reset,handlers,types}.go`.
+- [x] Endpoints: `GET /api/demo/health`, `POST /api/demo/seed`, `POST /api/demo/run`, `POST /api/demo/reset`, `GET /api/demo/wallet`.
+- [x] Idempotent + non-destructive seeder; **dependent custodial wallet = guardian's real deterministic address** (corrects `voucher.Delegate`'s `0xguardian-custodial-{id}` placeholder).
+- [x] `internal/redis.Client.FlushDB` (reset); `internal/demo/types_test.go` (deps/date/isolation/helpers).
+- [x] `Makefile` (`build`+=demo, `make demo`, `make reset-demo`); `deployments/Dockerfile.demo`; `.env.example` += `DEMO_PORT`/`DEMO_PROBE_AMOUNT_MIST`.
+
+### Frontend (`frontend/`)
+- [x] React 18 + Vite + TS, exact-pinned deps, dark theme, React Router + TanStack Query.
+- [x] Pages: Dashboard / ScenarioRunner / WalletViewer / Reset; components: HealthGate, FlowVisualizer, TransactionTable, WalletObjects, ScenarioCard.
+- [x] `npm install` + `npm run build` (tsc + vite) green; Suiscan links via `src/config.ts`.
+
+### Validation
+- [x] `go build ./...`, `go test ./...`, `go vet ./...` green; `gofumpt -l` clean on new files; `npm run build` green. `go.mod` unchanged.
+- [ ] **Live on-chain run of 2a/2d** (needs full stack + funded gas pool) — code paths built, not executed this session.
+- [ ] CI coverage gate ≥70% (still 38%); CI push pending user GH creds.
+
 ## Week 7 — Observability: OpenTelemetry & Datadog
 
 **Goal:** Full distributed tracing from Gate ingest → Sui mint, with metrics + structured logs. (R6: Datadog optional/portfolio-eval; OTel collector → local logging is baseline.)
