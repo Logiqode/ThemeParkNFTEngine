@@ -88,3 +88,28 @@ func TestDeterministicWalletRequiresEmail(t *testing.T) {
 		t.Fatal("expected error for empty email")
 	}
 }
+
+func TestEncodeBytesVecHex(t *testing.T) {
+	got := encodeBytesVec([]string{"ride-001"})
+	if len(got) != 1 {
+		t.Fatalf("len %d, want 1", len(got))
+	}
+	// "ride-001" hex-encoded, 0x-prefixed, must be even-length (u8 pairs).
+	if got[0] != "0x726964652d303031" {
+		t.Fatalf("encode ride-001 = %q", got[0])
+	}
+	if len(got[0])%2 != 0 || len(got[0]) < 2 {
+		t.Fatalf("hex encoding not byte-aligned: %q", got[0])
+	}
+}
+
+func TestToDateHex(t *testing.T) {
+	// 20260813 = 0x13527cd
+	if got := toDateHex("2026-08-13"); got != "0x13527cd" {
+		t.Fatalf("toDateHex(2026-08-13) = %q, want 0x13527cd", got)
+	}
+	// Compact form works too.
+	if got := toDateHex("20260813"); got != "0x13527cd" {
+		t.Fatalf("toDateHex(20260813) = %q", got)
+	}
+}

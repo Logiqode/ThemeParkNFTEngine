@@ -109,7 +109,12 @@ NFT artwork and metadata are pinned to IPFS via Pinata. The minter implements **
 
 ```bash
 # .env
-PINATA_API_KEY=your_api_key       # From https://app.pinata.cloud/developers/api-keys
+# Pinata JWT (preferred, current auth scheme). Generate at
+# https://app.pinata.cloud/developers/api-keys — the client sends
+# `Authorization: Bearer <PINATA_JWT>`. The legacy key/secret headers
+# (PINATA_API_KEY/PINATA_API_SECRET) are deprecated and rejected by Pinata.
+PINATA_JWT=your_pinata_jwt
+PINATA_API_KEY=your_api_key       # legacy fallback (only used when PINATA_JWT is empty)
 PINATA_API_SECRET=your_api_secret
 PINATA_GATEWAY=https://gateway.pinata.cloud   # Or your dedicated gateway
 ```
@@ -284,16 +289,31 @@ curl "http://localhost:8084/api/vouchers/claim?token=<jwt-from-share>&email=bob@
 ### Minter — Batch NFT Mint (port 8083)
 
 ```bash
-# zkLogin registration
+# zkLogin registration (W6-B: derives a deterministic custodial Sui wallet)
 curl -X POST http://localhost:8083/api/auth/google \
   -H "Content-Type: application/json" \
   -d '{"token":"<google-jwt>"}'
 
-# Batch mint daily attendance NFTs
-curl -X POST http://localhost:8083/mint/daily \
+# Week 6 (W6-A/W6-D): resolve the day's mint-ready participants (off-chain).
+curl -X POST http://localhost:8083/mint/resolve-day \
   -H "Content-Type: application/json" \
-  -d '{"email":"alice@test.com","date":"2026-07-26"}'
+  -d '{"date":"2026-08-13"}'
+
+# Week 6 (W6-D): submit REAL batch-mint transactions to Sui for every
+# mint-ready participant (own non-custodial OR guardian custodial wallet),
+# recording idempotent mint_logs. Returns per-participant tx digests.
+curl -X POST http://localhost:8083/mint/run-day \
+  -H "Content-Type: application/json" \
+  -d '{"date":"2026-08-13"}'
 ```
+
+> `/mint/run-day` replaces the Week-4 `/mint/daily` prototype. It reads the
+> durable `scan_events` source (not the ephemeral Redis cache), resolves each
+> participant's wallet, pins ride metadata once via Pinata, calls
+> `attendance::mint_batch` on the Sui testnet with the gas-pool signer, and
+> records the returned `tx_digest` in `mint_logs`. Re-running a day is
+> idempotent (M6.3) — `ON CONFLICT` returns the prior digest with no duplicate
+> on-chain transaction.
 
 ### Load Generator — Stress Testing
 

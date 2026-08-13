@@ -130,7 +130,11 @@ type OTelConfig struct {
 type PinataConfig struct {
 	APIKey    string `envconfig:"PINATA_API_KEY"`
 	APISecret string `envconfig:"PINATA_API_SECRET"`
-	Gateway   string `envconfig:"PINATA_GATEWAY" default:"https://gateway.pinata.cloud"`
+	// JWT is the bearer token from the Pinata developer dashboard. Pinata now
+	// requires the `Authorization: Bearer <jwt>` header; the legacy key/secret
+	// headers are deprecated and rejected. When set, the client uses the JWT.
+	JWT     string `envconfig:"PINATA_JWT"`
+	Gateway string `envconfig:"PINATA_GATEWAY" default:"https://gateway.pinata.cloud"`
 }
 
 type AWSConfig struct {

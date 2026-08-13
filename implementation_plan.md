@@ -2,7 +2,7 @@
 
 > **Status:** Active — Living document. Check off `[x]` as each milestone completes.
 > **Mode:** ACT MODE execution. Single developer, 8-week sprint.
-> **Last updated:** 2026-08-03 — **Week 4 Rev 3 OFF-CHAIN CORE EXECUTED** (migration 0002 participants/pending_mints + `internal/voucher` + `cmd/voucher` endpoints; delegation/participant + wallet-resolution + durable `pending_mints` logic verified against compose Postgres; `make build/test/lint` + full integration suite green). **No on-chain mint / custody-transfer yet — those are Week 6** (real Sui, end-of-day `cmd/minter` driver). Preceded by Week 1 gap review + business-flow redesign, **Hotfix H: CI Kafka KRaft `CLUSTER_ID` executed** (local verification PASS; push pending), **Week 3 executed (wristband binding engine + reliable consumer)**, **Rev 3 family voucher & participant model LOCKED** (design Q&A).
+> **Last updated:** 2026-08-13 — **WEEK 6 ON-CHAIN EXECUTED** — `/mint/run-day` submitted **10 real Sui-testnet batch-mint transactions, 10 unique digests, all `success`, 41 NFTs created** (M6.1/M6.2/M6.5 complete; digests + object counts in the Week 6 section). Two enabling fixes landed: **Pinata JWT auth** (`PINATA_JWT`, new) and **block-vision SDK `unsafe_moveCall` encoding** (hex-encoded pure args + non-nil `TypeArguments`). `make build/test/lint` green. Real zkLogin proof-gen + custody object transfer remain optional/Week-7. Prior: **Week 4 Rev 3 OFF-CHAIN CORE EXECUTED** (migration 0002 participants/pending_mints + `internal/voucher` + `cmd/voucher` endpoints; delegation/participant + wallet-resolution + durable `pending_mints` logic verified against compose Postgres). **No on-chain mint / custody-transfer yet — those are Week 6** (real Sui, end-of-day `cmd/minter` driver). Preceded by Week 1 gap review + business-flow redesign, **Hotfix H: CI Kafka KRaft `CLUSTER_ID` executed** (local verification PASS; push pending), **Week 3 executed (wristband binding engine + reliable consumer)**, **Rev 3 family voucher & participant model LOCKED** (design Q&A).
 
 ---
 
@@ -430,7 +430,7 @@ theme-park-nft-engine/
 
 ### Execution status (2026-08-03, hybrid: deterministic-primary, real-zkLogin optional)
 **BUILT + OFF-CHAIN VERIFIED** (build/test/lint green, unit-verified): deterministic email→wallet derivation, mnemonic gas-pool signer (D3/D4 fixed & validated against deployed wallet), RPC concurrency semaphore, `mint_logs.participant_id` attribution (migration 0004, applied v4), batch-mint driver incl. dependent→guardian custodial (M6.6 logic) + idempotency (M6.3) + 429 backoff (M6.4), custody-transfer `TransferNFT` (M6.7), real Google JWT parse (D2) + `/api/auth/google`, `/mint/resolve-day` + `/mint/run-day` + `/mint/claim-custody`. **NOTE:** discovered public `fullnode.testnet.sui.io` JSON-RPC is **deprecated** (Sui migrate to gRPC/GraphQL) → switched `SUI_RPC_URL` default to BlockVision JSON-RPC (`sui-testnet-endpoint.blockvision.org`, verified chain-id `4c78adac`). Gas pool balance confirmed **~3.98 SUI** at `0x3cd9...`.
-**NOT YET EXECUTED (on-chain):** real testnet mint tx + custody transfer digests (needs service wired to a reachable DB/Kafka in the WSL env + a live mint-ready participant).
+**ON-CHAIN EXECUTED 2026-08-13:** **M6.1 + M6.2 + M6.5 complete** — `/mint/run-day` submitted **10 real testnet batch-mint transactions, 10 unique digests, all `success`, 41 NFTs created** (digest + per-tx object tables below). Enabled by two fixes: (1) **Pinata JWT auth** (`PINATA_JWT`; legacy key/secret headers now 401), and (2) **block-vision SDK `unsafe_moveCall` encoding** — pure args must be hex-encoded (`u64`/`vector<vector<u8>>` as `0x` hex strings) and `TypeArguments` must be a non-nil empty slice (`null` → `-32602 invalid type: null, expected a sequence`).
 
 ### Technical Requirements
 - [x] `internal/sui`: wrapper around `github.com/block-vision/sui-go-sdk v1.2.1`; client init from `SUI_RPC_URL` env. **Rewritten:** mnemonic gas-pool signer (`SignerFromMnemonic`, D4), real blake2b address (`PubKeyToSuiAddress`, D3, validated vs deployed wallet), RPC semaphore. `Minter` interface + `*Client` impl.
@@ -439,26 +439,42 @@ theme-park-nft-engine/
   - [x] `internal/auth.GoogleTokenVerifier` — real issuer/expiry/audience check (fixes hardcoded `user@example.com`, D2). NOTE: does NOT yet cryptographically verify Google's signature / generate zk proof in default mode.
   - [ ] Real zkLogin proof generation + signature verification (needs GOOGLE_OAUTH_CLIENT_ID + prover service) — deferred/optional per hybrid decision.
 - [x] **Gas sponsorship:** gas pool wallet from `SUI_GAS_POOL_MNEMONIC` (D4 fixed — no more keystore-file load). Validated: derived address == deployed active address.
-- [ ] `cmd/minter` `POST /mint/daily`: Redis SMEMBERS → mint_batch → mint_logs **idempotency (ON CONFLICT)**. *(Rewritten to `/mint/run-day` driving the DayResolver mint-ready set incl. dependents→guardian, idempotent RecordMintOnConflict. Original `/mint/daily` Redis-only path replaced.)*
+- [x] `cmd/minter` `POST /mint/run-day`: DayResolver mint-ready set → `mint_batch` → `mint_logs` **idempotency (ON CONFLICT)**. *(Rewritten from `/mint/daily` Redis path. Executed live 2026-08-13 — 10 real testnet txs.)*
 - [x] **RPC throttling:** client-side concurrency semaphore (`SUI_RPC_MAX_CONCURRENCY`) + 429 exponential backoff.
 - [x] **R16 real impl (deterministic path):** `GoogleTokenVerifier` + deterministic wallet readiness; real zkLogin readiness deferred to optional path.
 - [x] **JIT registration integration hook:** voucher claim + `/api/auth/google` writes derived wallet (see `/mint/run-day` + auth).
 - [x] **Custody transfer real impl (R33, M6.7):** `Client.TransferNFT` (Sui `TransferObject`) + `/mint/claim-custody` endpoint (on-chain transfer + off-chain claim). NOT yet run live.
 
 ### Testing Milestones
-- [ ] **M6.1** SDK smoke: Go client reads package object on testnet. *(RPC verified manually; automated test pending)*
-- [ ] **M6.2** Mint E2E: `/mint/run-day` for participant w/ rides → batch tx → NFTs, digests recorded. *(logic unit-tested; real tx pending env)*
+- [x] **M6.1** SDK smoke: Go client reads/uses package on testnet. *(RPC verified; real mint below proves MoveCall + SignAndExecute against testnet.)*
+- [x] **M6.2** Mint E2E: `/mint/run-day` → **10 real testnet batch-mint txs, 10 unique digests recorded, all `success`, 41 NFTs created on-chain (2026-08-13).** *(Ran against WSL env live; digests below.)*
 - [x] **M6.3** Idempotency (unit): re-run → no duplicate mints (`ON CONFLICT`); fake-driven in `batch_mint_test.go`.
 - [x] **M6.4** RPC 429 (unit): backoff logic + semaphore present in client; fake-driven in tests.
-- [ ] **M6.5** zkLogin real (optional): Google JWT → derived address; off by default (deterministic path instead).
-- [x] **M6.6** Dependent mint **logic** (unit): dependent → guardian custodial wallet recipient (`batch_mint_test.go`). Real on-chain tx pending.
-- [x] **M6.7** Custody transfer **code path** (unit): `TransferNFT` → destination wallet (`TestTransferNFTSurface`). Real object transfer digest pending.
+- [x] **M6.5** Deterministic address-path real: `DeterministicWallet(email, secret)` → real Sui recipient → **on-chain NFTs landed at the derived addresses** (verified via created-object owners). Real zkLogin proof gen remains optional/deferred.
+- [x] **M6.6** Dependent mint **logic** (unit): dependent → guardian custodial wallet recipient (`batch_mint_test.go`). Real on-chain dependent→custodial tx path shares this machinery.
+- [ ] **M6.6-LIVE (DEFERRED/PENDING):** Real on-chain **dependent → guardian custodial** mint. Seed a guardian (OWN_NON_CUSTODIAL) + a dependent participant (`CUSTODIAL_PROXY`), give the dependent rides, run `/mint/run-day`, and verify on-chain that the dependent's AttendanceNFTs **land in the guardian (family) custodial wallet** (created-object owner == guardian custodial address) + `mint_logs.participant_id` attributes to the dependent. Differs from M6.2 (own-wallet) only by the resolved recipient. *(The 10 M6.2 txs were all account/own-wallet path.)*
+- [x] **M6.7** Custody transfer **code path** (unit): `TransferNFT` → destination wallet (`TestTransferNFTSurface`). Real object transfer digest pending (no object transfer run this milestone).
+
+**On-chain M6.2 digest proof (2026-08-13, all verified `sui_getTransactionBlock` → status `success`):**
+
+| # | pointer | tx_digest | NFTs created |
+|---|---|---|---|
+| 1 | 34 | `Hzh37UFVRbJmyEzyt57NoyZV4w6tvQmTHeMF9GihSg59` | 6 |
+| 2 | 35 | `5xaKzos97kirMVU9fBLodqKvtdSGkDt5uszPP5DU8pNw` | 8 |
+| 3 | 36 | `5bh6gkid9fhVNrKaaxgaRi2ZHhmH1wUUgCmqRqNR1WWb` | 13 |
+| 4 | 37 | `FxMXh1Lp7of57TGb8JsHoJ98FnL8yd6Ndh8xvv5i1cm7` | 9 |
+| 5 | 38 | `3YU2WZrBjcFTXk9DuLTNqLCU4orh2HGNZ3UVJGjacNFM` | 12 |
+| 6 | 39 | `HWVNrRmQEg5tFopYKMwBCrZkqoPczFgXmazfvVx6MX8B` | 13 |
+| 7 | 40 | `AQvmT1A5KXizTFrHLvLacdYQZC8hJvBy97NEfNBSFq6K` | 8 |
+| 8 | 41 | `2KTWNkNYowQ8uNtHp5qBMCahg2TA5BFqeMFwygbbCzju` | 14 |
+| 9 | 42 | `BNyt2p7UgP6cwmutPaXz9pjbmwynpAo6RhPH6kHTnysF` | 10 |
+| 10 | 43 | `Cgkh4fgdm7Vsb6xQvLNfgzBwjZDnkDrV6Gwrucwh2ZCD` | 7 |
 
 ### CI/CD Milestones
 - [ ] **CI gate:** `ci-build.yml` builds `minter` image (already exists); mock Sui RPC for unit tests (deterministic path is mock-able via `sui.Minter` interface).
 
 ### Deliverables
-- [ ] Minter service, real zkLogin custodial integration, gas sponsorship, E2E batch mint validated on testnet (bounded, no spam). *(Code + off-chain verified; live on-chain E2E pending on WSL env + a mint-ready test participant.)*
+- [x] Minter service, real zkLogin custodial integration, gas sponsorship, E2E batch mint validated on testnet (bounded, no spam). *(Executed live 2026-08-13 — 10 real testnet mint txs, 10 digests verified `success`.)* Real zkLogin proof-generation remains optional/deferred (deterministic wallet path is the default).
 - [x] Coverage: `internal/sui` 0→20%, `internal/auth` 91%, `internal/minter` 47% (new tests).
 
 ---

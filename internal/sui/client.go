@@ -3,7 +3,9 @@ package sui
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,10 +113,10 @@ func (c *Client) MintBatchAttendance(ctx context.Context, suiAddress string, rid
 	args := []interface{}{
 		c.mintCapID,  // MintCap object ID
 		suiAddress,   // recipient
-		rideIDs,      // vector<vector<u8>> ride_ids
-		toDateU64(date),
-		names,        // vector<vector<u8>> names
-		metadataURLs, // vector<vector<u8>> metadata_urls
+		encodeBytesVec(rideIDs),     // vector<vector<u8>> ride_ids
+		toDateHex(date),             // u64 date (hex string, JSON-RPC pure)
+		encodeBytesVec(names),       // vector<vector<u8>> names
+		encodeBytesVec(metadataURLs), // vector<vector<u8>> metadata_urls
 	}
 
 	moveReq := models.MoveCallRequest{
@@ -122,6 +124,7 @@ func (c *Client) MintBatchAttendance(ctx context.Context, suiAddress string, rid
 		PackageObjectId: c.packageID,
 		Module:          "attendance",
 		Function:        "mint_batch",
+		TypeArguments:   []interface{}{}, // non-nil so it marshals as [] not null
 		Arguments:       args,
 		GasBudget:       c.gasBudget,
 	}
@@ -241,6 +244,27 @@ func (c *Client) TransferNFT(ctx context.Context, nftObjectID, toAddress string)
 }
 
 // ── Internal helpers ──
+
+// encodeBytesVec hex-encodes a string slice as a raw hex address array to satisfy
+// Sui's JSON-RPC pure-value encoding for `vector<vector<u8>>`. Each element is
+// rendered as a 0x-prefixed hex string (matching how the Sui CLI / SDK serialize
+// byte-vector pure arguments), which the modern fullnode accepts via
+// `unsafe_moveCall`. Passing plain Go strings/numbers fails with
+// "invalid type: null, expected a sequence".
+func encodeBytesVec(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = "0x" + hex.EncodeToString([]byte(s))
+	}
+	return out
+}
+
+// toDateHex converts a date string (YYYYMMDD or YYYY-MM-DD) to a 0x-hex u64
+// string, the format Sui's JSON-RPC requires for a `u64` pure argument.
+func toDateHex(date string) string {
+	d := toDateU64(strings.ReplaceAll(date, "-", ""))
+	return "0x" + strconv.FormatUint(d, 16)
+}
 
 // toDateU64 converts a date string (YYYYMMDD or YYYY-MM-DD) to a u64.
 func toDateU64(date string) uint64 {

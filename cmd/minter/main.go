@@ -60,7 +60,7 @@ func main() {
 	}
 
 	// IPFS pinning (Option A, CIDCache) + deterministic metadata adapter.
-	pinata := storage.NewPinataClient(cfg.Pinata.APIKey, cfg.Pinata.APISecret, cfg.Pinata.Gateway)
+	pinata := storage.NewPinataClient(cfg.Pinata.APIKey, cfg.Pinata.APISecret, cfg.Pinata.JWT, cfg.Pinata.Gateway)
 	cidCache := storage.NewCIDCache(pinata)
 	meta := minterService.NewCIDMetadataProvider(cidCache)
 

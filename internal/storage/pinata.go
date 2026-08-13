@@ -20,6 +20,7 @@ import (
 type PinataClient struct {
 	apiKey    string
 	apiSecret string
+	jwt       string // preferred auth: Authorization: Bearer <jwt>
 	gateway   string
 	client    *http.Client
 }
@@ -32,20 +33,35 @@ type PinataResponse struct {
 }
 
 // NewPinataClient creates a Pinata client. apiKey and apiSecret come from
-// the Pinata developer dashboard (https://app.pinata.cloud/developers/api-keys).
+// the Pinata developer dashboard (https://app.pinata.cloud/developers/api-keys);
+// jwt, when non-empty, is the preferred bearer token (Pinata now requires the
+// `Authorization: Bearer <jwt>` header over the legacy key/secret headers).
 // gateway is the IPFS gateway URL (default: https://gateway.pinata.cloud).
-func NewPinataClient(apiKey, apiSecret, gateway string) *PinataClient {
+func NewPinataClient(apiKey, apiSecret, jwt, gateway string) *PinataClient {
 	if gateway == "" {
 		gateway = "https://gateway.pinata.cloud"
 	}
 	return &PinataClient{
 		apiKey:    apiKey,
 		apiSecret: apiSecret,
+		jwt:       jwt,
 		gateway:   gateway,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// applyAuth sets the Pinata authentication headers. JWT bearer auth is used
+// when present (Pinata's current scheme); otherwise falls back to the legacy
+// pinata_api_key / pinata_secret_api_key headers.
+func (p *PinataClient) applyAuth(req *http.Request) {
+	if p.jwt != "" {
+		req.Header.Set("Authorization", "Bearer "+p.jwt)
+		return
+	}
+	req.Header.Set("pinata_api_key", p.apiKey)
+	req.Header.Set("pinata_secret_api_key", p.apiSecret)
 }
 
 // PinFile uploads a file (image, SVG, etc.) to IPFS via Pinata.
@@ -70,8 +86,7 @@ func (p *PinataClient) PinFile(ctx context.Context, filename string, content []b
 		return "", "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("pinata_api_key", p.apiKey)
-	req.Header.Set("pinata_secret_api_key", p.apiSecret)
+	p.applyAuth(req)
 
 	log.Debug().Str("filename", filename).Int("size", len(content)).Msg("pinning file to IPFS")
 
@@ -118,8 +133,7 @@ func (p *PinataClient) PinJSON(ctx context.Context, name string, data interface{
 		return "", "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("pinata_api_key", p.apiKey)
-	req.Header.Set("pinata_secret_api_key", p.apiSecret)
+	p.applyAuth(req)
 
 	log.Debug().Str("name", name).Msg("pinning JSON to IPFS")
 
